@@ -52,6 +52,11 @@ export type GameMode = "city" | "track";
 export type Stats = {
   /** km/h display. */
   speed: number;
+  /** Player world position, used by HUD elements such as the minimap. */
+  x: number;
+  z: number;
+  /** Player yaw in radians, where 0 faces world -Z. */
+  heading: number;
   /** Coins earned this session. */
   coins: number;
   /** Nitro charge 0..1. */
@@ -638,6 +643,9 @@ export class GameEngine {
       this.statsTimer = 0;
       this.cb.onStats?.({
         speed: Math.round(Math.abs(this.vf) * KMH),
+        x: this.px,
+        z: this.pz,
+        heading: this.heading,
         coins: this.sessionCoins,
         nitro: this.nitroCharge,
         drifting: this.driftActive,

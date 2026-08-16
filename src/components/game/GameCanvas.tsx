@@ -6,7 +6,6 @@ import {
   RotateCcw,
   Home,
   Coins,
-  Gauge,
   ChevronUp,
   ChevronDown,
   ChevronLeft,
@@ -35,6 +34,8 @@ import {
   type CameraSettings,
 } from "../../game/config/camera";
 import { profileStore } from "../../game/state/persistence";
+import { ROADS, RING_HALF, RING_RADIUS, STUNT, WORLD_RADIUS, roadExtent } from "../../game/engine/world";
+import { PIT, TRACK, ovalPoint } from "../../game/engine/track";
 import { Button } from "../ui/button";
 import { StatusPanel } from "./StatusPanel";
 
@@ -51,6 +52,9 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
   const [status, setStatus] = useState<Status>("playing");
   const [stats, setStats] = useState<Stats>({
     speed: 0,
+    x: 0,
+    z: 0,
+    heading: 0,
     coins: 0,
     nitro: 1,
     drifting: false,
@@ -264,13 +268,8 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
       )}
 
       {/* Top-left HUD */}
-      <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col gap-1.5">
-        {status === "playing" && (
-          <div className="flex flex-col items-center self-start rounded-2xl bg-background/70 px-4 py-1.5 shadow-lg backdrop-blur">
-            <span className="text-2xl font-extrabold leading-none tabular-nums">{stats.speed}</span>
-            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">km/h</span>
-          </div>
-        )}
+      <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col items-start gap-1.5">
+        {status === "playing" && <MiniMap mode={mode} x={stats.x} z={stats.z} heading={stats.heading} />}
         <HudPill icon={<Coins className="h-4 w-4" />} value={stats.coins} tone="coin" />
         {stats.driftScore > 0 && (
           <div className="flex items-center gap-2 rounded-full bg-[#ff5a5f] px-3 py-1 text-sm font-extrabold text-white shadow">
@@ -284,8 +283,9 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
       {/* Fuel & tire status panel */}
       <StatusPanel fuel={stats.fuel} tyres={stats.tyres} />
 
-      {/* Top-right controls */}
-      <div className="absolute right-3 top-3 z-30 flex gap-2">
+      {/* Top-right speed and controls */}
+      <div className="absolute right-3 top-3 z-30 flex items-start gap-2">
+        {status === "playing" && <SpeedReadout speed={stats.speed} />}
         <button
           onClick={cycleCamera}
           aria-label="Switch camera view"
@@ -434,6 +434,141 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
   );
 }
 
+
+function SpeedReadout({ speed }: { speed: number }) {
+  return (
+    <div className="pointer-events-none flex h-11 min-w-[86px] flex-col items-center justify-center rounded-full bg-background/80 px-4 shadow-lg backdrop-blur">
+      <span className="text-xl font-extrabold leading-none tabular-nums">{speed}</span>
+      <span className="text-[9px] font-bold uppercase leading-none tracking-widest text-muted-foreground">km/h</span>
+    </div>
+  );
+}
+
+function MiniMap({
+  mode,
+  x,
+  z,
+  heading,
+}: {
+  mode: "city" | "track";
+  x: number;
+  z: number;
+  heading: number;
+}) {
+  const size = 136;
+  const pad = 10;
+  const worldSize = mode === "track" ? 760 : WORLD_RADIUS * 2;
+  const scale = (size - pad * 2) / worldSize;
+  const centre = size / 2;
+  const toMap = (wx: number, wz: number) => ({
+    x: centre + wx * scale,
+    y: centre + wz * scale,
+  });
+  const car = toMap(x, z);
+  const rot = (heading * 180) / Math.PI;
+
+  return (
+    <div className="h-[116px] w-[116px] overflow-hidden rounded-2xl border border-white/20 bg-black/60 shadow-lg backdrop-blur-md sm:h-[136px] sm:w-[136px]">
+      <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full">
+        <defs>
+          <radialGradient id="minimap-ground" cx="50%" cy="50%" r="60%">
+            <stop offset="0%" stopColor="#7acb70" />
+            <stop offset="100%" stopColor="#4ea35f" />
+          </radialGradient>
+        </defs>
+        <rect width={size} height={size} fill="#4aa8d8" />
+        {mode === "track" ? <TrackMap scale={scale} toMap={toMap} /> : <CityMap scale={scale} toMap={toMap} />}
+        <g transform={`translate(${car.x} ${car.y}) rotate(${rot})`}>
+          <path d="M 0 -7 L 5 6 L 0 3 L -5 6 Z" fill="#ff5a5f" stroke="white" strokeWidth="1.4" />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+function CityMap({
+  scale,
+  toMap,
+}: {
+  scale: number;
+  toMap: (wx: number, wz: number) => { x: number; y: number };
+}) {
+  const centre = toMap(0, 0);
+  const stunt = toMap(STUNT.x, STUNT.z);
+
+  return (
+    <>
+      <circle cx={centre.x} cy={centre.y} r={WORLD_RADIUS * scale} fill="url(#minimap-ground)" />
+      <circle
+        cx={centre.x}
+        cy={centre.y}
+        r={RING_RADIUS * scale}
+        fill="none"
+        stroke="#4b4f58"
+        strokeWidth={RING_HALF * scale * 2}
+      />
+      {ROADS.map((road, i) => {
+        const extent = roadExtent(road.pos);
+        const a = road.axis === "z" ? toMap(-extent, road.pos) : toMap(road.pos, -extent);
+        const b = road.axis === "z" ? toMap(extent, road.pos) : toMap(road.pos, extent);
+        return (
+          <line
+            key={`${road.axis}-${road.pos}-${i}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            stroke="#4b4f58"
+            strokeWidth={road.half * scale * 2}
+            strokeLinecap="round"
+          />
+        );
+      })}
+      <circle cx={stunt.x} cy={stunt.y} r={STUNT.radius * scale} fill="#5b6270" stroke="#ffcf3f" strokeWidth="1.3" />
+      <circle cx={centre.x} cy={centre.y} r={WORLD_RADIUS * scale} fill="none" stroke="rgba(255,255,255,0.42)" strokeWidth="1.4" />
+    </>
+  );
+}
+
+function TrackMap({
+  scale,
+  toMap,
+}: {
+  scale: number;
+  toMap: (wx: number, wz: number) => { x: number; y: number };
+}) {
+  const outer = ovalPolyline(TRACK.half, toMap);
+  const inner = ovalPolyline(-TRACK.half, toMap);
+  const pitOuter = pitPolyline(PIT.latOuter, toMap);
+  const pitInner = pitPolyline(PIT.latInner, toMap);
+
+  return (
+    <>
+      <circle cx="68" cy="68" r={340 * scale} fill="url(#minimap-ground)" />
+      <polygon points={`${outer} ${inner.split(" ").reverse().join(" ")}`} fill="#4b4f58" />
+      <polyline points={pitOuter} fill="none" stroke="#3b404a" strokeWidth={(PIT.latOuter - PIT.latInner) * scale} strokeLinecap="round" />
+      <polyline points={pitInner} fill="none" stroke="#ffcf3f" strokeWidth="1.2" />
+      <polyline points={ovalPolyline(0, toMap)} fill="none" stroke="rgba(255,255,255,0.55)" strokeWidth="1.2" strokeDasharray="3 3" />
+    </>
+  );
+}
+
+function ovalPolyline(lat: number, toMap: (wx: number, wz: number) => { x: number; y: number }) {
+  return Array.from({ length: 97 }, (_, i) => {
+    const p = ovalPoint((i / 96) * Math.PI * 2, lat);
+    const m = toMap(p.x, p.z);
+    return `${m.x.toFixed(1)},${m.y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function pitPolyline(lat: number, toMap: (wx: number, wz: number) => { x: number; y: number }) {
+  return Array.from({ length: 33 }, (_, i) => {
+    const theta = PIT.thetaStart - (i / 32) * (PIT.thetaStart - PIT.thetaEnd);
+    const p = ovalPoint(theta, lat);
+    const m = toMap(p.x, p.z);
+    return `${m.x.toFixed(1)},${m.y.toFixed(1)}`;
+  }).join(" ");
+}
 
 
 function ControlButton({
