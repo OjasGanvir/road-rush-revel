@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   Pause,
@@ -17,6 +17,7 @@ import {
   VolumeX,
   Camera,
   Flame,
+  X,
 } from "lucide-react";
 import {
   GameEngine,
@@ -35,12 +36,14 @@ import {
 } from "../../game/config/camera";
 import { profileStore } from "../../game/state/persistence";
 import { ROADS, RING_HALF, RING_RADIUS, STUNT, WORLD_RADIUS, roadExtent } from "../../game/engine/world";
-import { PIT, TRACK, ovalPoint } from "../../game/engine/track";
+import { nearestOval, PIT, TRACK, ovalPoint } from "../../game/engine/track";
 import { Button } from "../ui/button";
 import { StatusPanel } from "./StatusPanel";
 
 type Status = "playing" | "paused";
 type Popup = { id: number; text: string; kind: PopupKind };
+type MapPoint = { x: number; z: number };
+type Route = { points: MapPoint[]; destination: MapPoint };
 
 let popupId = 0;
 
@@ -75,6 +78,13 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
     dynamicFov: true,
   });
   const [tod, setTod] = useState<TimeOfDayId>("sunny");
+  const [mapOpen, setMapOpen] = useState(false);
+  const [destination, setDestination] = useState<MapPoint | null>(null);
+
+  const route = useMemo(
+    () => (destination ? buildRoute(mode, { x: stats.x, z: stats.z }, destination) : null),
+    [destination, mode, stats.x, stats.z],
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -131,6 +141,28 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
     };
   }, [mode]);
 
+  useEffect(() => {
+    const onMapKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "m") return;
+      e.preventDefault();
+      setMapOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onMapKey);
+    return () => window.removeEventListener("keydown", onMapKey);
+  }, []);
+
+  useEffect(() => {
+    engineRef.current?.setRoute(route?.points ?? null);
+  }, [route]);
+
+  useEffect(() => {
+    if (!destination) return;
+    const arrivalRadius = mode === "track" ? 13 : 11;
+    if (Math.hypot(stats.x - destination.x, stats.z - destination.z) <= arrivalRadius) {
+      setDestination(null);
+    }
+  }, [destination, mode, stats.x, stats.z]);
+
   const handlePause = useCallback(() => {
     engineRef.current?.pause();
     setStatus("paused");
@@ -181,6 +213,11 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
     engineRef.current?.setTimeOfDay(id);
     profileStore.setTimeOfDay(id);
   };
+
+  const selectDestination = useCallback(
+    (point: MapPoint) => setDestination(snapToRoad(mode, point)),
+    [mode],
+  );
 
   return (
     <div className="relative h-[100dvh] w-screen overflow-hidden bg-sky-200 no-select">
@@ -269,7 +306,16 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
 
       {/* Top-left HUD */}
       <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col items-start gap-1.5">
-        {status === "playing" && <MiniMap mode={mode} x={stats.x} z={stats.z} heading={stats.heading} />}
+        {status === "playing" && (
+          <MiniMap
+            mode={mode}
+            x={stats.x}
+            z={stats.z}
+            heading={stats.heading}
+            route={route}
+            onOpen={() => setMapOpen(true)}
+          />
+        )}
         <HudPill icon={<Coins className="h-4 w-4" />} value={stats.coins} tone="coin" />
         {stats.driftScore > 0 && (
           <div className="flex items-center gap-2 rounded-full bg-[#ff5a5f] px-3 py-1 text-sm font-extrabold text-white shadow">
@@ -430,6 +476,18 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
           </div>
         </Overlay>
       )}
+
+      {mapOpen && (
+        <FullMapOverlay
+          mode={mode}
+          x={stats.x}
+          z={stats.z}
+          heading={stats.heading}
+          route={route}
+          onSelect={selectDestination}
+          onClose={() => setMapOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -449,11 +507,15 @@ function MiniMap({
   x,
   z,
   heading,
+  route,
+  onOpen,
 }: {
   mode: "city" | "track";
   x: number;
   z: number;
   heading: number;
+  route: Route | null;
+  onOpen: () => void;
 }) {
   const size = 136;
   const pad = 10;
@@ -468,7 +530,12 @@ function MiniMap({
   const rot = (heading * 180) / Math.PI;
 
   return (
-    <div className="h-[116px] w-[116px] overflow-hidden rounded-2xl border border-white/20 bg-black/60 shadow-lg backdrop-blur-md sm:h-[136px] sm:w-[136px]">
+    <button
+      type="button"
+      aria-label="Open map"
+      onClick={onOpen}
+      className="pointer-events-auto h-[116px] w-[116px] overflow-hidden rounded-2xl border border-white/20 bg-black/60 text-left shadow-lg backdrop-blur-md sm:h-[136px] sm:w-[136px]"
+    >
       <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full">
         <defs>
           <radialGradient id="minimap-ground" cx="50%" cy="50%" r="60%">
@@ -477,21 +544,27 @@ function MiniMap({
           </radialGradient>
         </defs>
         <rect width={size} height={size} fill="#4aa8d8" />
-        {mode === "track" ? <TrackMap scale={scale} toMap={toMap} /> : <CityMap scale={scale} toMap={toMap} />}
+        {mode === "track" ? (
+          <TrackMap scale={scale} toMap={toMap} route={route} />
+        ) : (
+          <CityMap scale={scale} toMap={toMap} route={route} />
+        )}
         <g transform={`translate(${car.x} ${car.y}) rotate(${rot})`}>
           <path d="M 0 -7 L 5 6 L 0 3 L -5 6 Z" fill="#ff5a5f" stroke="white" strokeWidth="1.4" />
         </g>
       </svg>
-    </div>
+    </button>
   );
 }
 
 function CityMap({
   scale,
   toMap,
+  route,
 }: {
   scale: number;
   toMap: (wx: number, wz: number) => { x: number; y: number };
+  route: Route | null;
 }) {
   const centre = toMap(0, 0);
   const stunt = toMap(STUNT.x, STUNT.z);
@@ -526,6 +599,7 @@ function CityMap({
       })}
       <circle cx={stunt.x} cy={stunt.y} r={STUNT.radius * scale} fill="#5b6270" stroke="#ffcf3f" strokeWidth="1.3" />
       <circle cx={centre.x} cy={centre.y} r={WORLD_RADIUS * scale} fill="none" stroke="rgba(255,255,255,0.42)" strokeWidth="1.4" />
+      <RouteOverlay route={route} toMap={toMap} />
     </>
   );
 }
@@ -533,9 +607,11 @@ function CityMap({
 function TrackMap({
   scale,
   toMap,
+  route,
 }: {
   scale: number;
   toMap: (wx: number, wz: number) => { x: number; y: number };
+  route: Route | null;
 }) {
   const outer = ovalPolyline(TRACK.half, toMap);
   const inner = ovalPolyline(-TRACK.half, toMap);
@@ -549,8 +625,38 @@ function TrackMap({
       <polyline points={pitOuter} fill="none" stroke="#3b404a" strokeWidth={(PIT.latOuter - PIT.latInner) * scale} strokeLinecap="round" />
       <polyline points={pitInner} fill="none" stroke="#ffcf3f" strokeWidth="1.2" />
       <polyline points={ovalPolyline(0, toMap)} fill="none" stroke="rgba(255,255,255,0.55)" strokeWidth="1.2" strokeDasharray="3 3" />
+      <RouteOverlay route={route} toMap={toMap} />
     </>
   );
+}
+
+function RouteOverlay({
+  route,
+  toMap,
+}: {
+  route: Route | null;
+  toMap: (wx: number, wz: number) => { x: number; y: number };
+}) {
+  if (!route || route.points.length < 2) return null;
+  const points = worldPolyline(route.points, toMap);
+  const destination = toMap(route.destination.x, route.destination.z);
+  return (
+    <>
+      <polyline points={points} fill="none" stroke="#00bfff" strokeOpacity="0.38" strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
+      <polyline points={points} fill="none" stroke="#63edff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={destination.x} cy={destination.y} r="4.5" fill="#63edff" stroke="#06131d" strokeWidth="1.5" />
+      <circle cx={destination.x} cy={destination.y} r="8" fill="none" stroke="#63edff" strokeOpacity="0.72" strokeWidth="1.5" />
+    </>
+  );
+}
+
+function worldPolyline(points: MapPoint[], toMap: (wx: number, wz: number) => { x: number; y: number }) {
+  return points
+    .map((p) => {
+      const m = toMap(p.x, p.z);
+      return `${m.x.toFixed(1)},${m.y.toFixed(1)}`;
+    })
+    .join(" ");
 }
 
 function ovalPolyline(lat: number, toMap: (wx: number, wz: number) => { x: number; y: number }) {
@@ -568,6 +674,310 @@ function pitPolyline(lat: number, toMap: (wx: number, wz: number) => { x: number
     const m = toMap(p.x, p.z);
     return `${m.x.toFixed(1)},${m.y.toFixed(1)}`;
   }).join(" ");
+}
+
+function FullMapOverlay({
+  mode,
+  x,
+  z,
+  heading,
+  route,
+  onSelect,
+  onClose,
+}: {
+  mode: "city" | "track";
+  x: number;
+  z: number;
+  heading: number;
+  route: Route | null;
+  onSelect: (point: MapPoint) => void;
+  onClose: () => void;
+}) {
+  const size = 1000;
+  const worldSize = mode === "track" ? 760 : WORLD_RADIUS * 2;
+  const scale = (size - 160) / worldSize;
+  const centre = size / 2;
+  const toMap = (wx: number, wz: number) => ({
+    x: centre + wx * scale,
+    y: centre + wz * scale,
+  });
+  const car = toMap(x, z);
+  const rot = (heading * 180) / Math.PI;
+
+  const handleMapClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    const ctm = e.currentTarget.getScreenCTM();
+    if (!ctm) return;
+    const point = e.currentTarget.createSVGPoint();
+    point.x = e.clientX;
+    point.y = e.clientY;
+    const local = point.matrixTransform(ctm.inverse());
+    onSelect({ x: (local.x - centre) / scale, z: (local.y - centre) / scale });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-[#07131c]/95 p-3 backdrop-blur-sm" onClick={onClose}>
+      <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/15 bg-[#102a35] shadow-2xl">
+        <div className="pointer-events-none absolute inset-x-5 top-4 z-10 flex items-center justify-between">
+          <div className="rounded-full bg-black/45 px-4 py-2 text-sm font-extrabold uppercase tracking-[0.2em] text-white/90 backdrop-blur">
+            {mode === "track" ? "Speedway map" : "City map"}
+          </div>
+          <button
+            type="button"
+            aria-label="Close map"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full bg-white/90 text-slate-900 shadow-lg transition-transform active:scale-90"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        <div className="absolute inset-x-3 bottom-3 top-16 overflow-hidden rounded-xl border border-white/10 bg-[#4aa8d8]">
+          <svg
+            viewBox={`0 0 ${size} ${size}`}
+            className="h-full w-full cursor-crosshair"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleMapClick(e);
+            }}
+          >
+            <defs>
+              <radialGradient id="full-map-ground" cx="50%" cy="50%" r="60%">
+                <stop offset="0%" stopColor="#7acb70" />
+                <stop offset="100%" stopColor="#4ea35f" />
+              </radialGradient>
+            </defs>
+            <rect width={size} height={size} fill="#4aa8d8" />
+            {mode === "track" ? (
+              <TrackMap scale={scale} toMap={toMap} route={route} />
+            ) : (
+              <CityMap scale={scale} toMap={toMap} route={route} />
+            )}
+            <g transform={`translate(${car.x} ${car.y}) rotate(${rot})`}>
+              <path d="M 0 -17 L 12 15 L 0 8 L -12 15 Z" fill="#ff5a5f" stroke="white" strokeWidth="2.5" />
+            </g>
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type RoadProjection = {
+  point: MapPoint;
+  distance: number;
+  kind: "line" | "ring";
+  index: number;
+  coordinate: number;
+};
+
+type RoadRef = { id: number; coordinate: number };
+type RouteNode = { point: MapPoint; edges: Array<{ to: number; weight: number }> };
+
+function snapToRoad(mode: "city" | "track", point: MapPoint): MapPoint {
+  if (mode === "track") {
+    const nearest = nearestOval(point.x, point.z);
+    return { x: nearest.x, z: nearest.z };
+  }
+  return nearestCityRoad(point).point;
+}
+
+function buildRoute(mode: "city" | "track", start: MapPoint, destination: MapPoint): Route {
+  const snappedDestination = snapToRoad(mode, destination);
+  const points = mode === "track"
+    ? buildTrackRoute(start, snappedDestination)
+    : buildCityRoute(start, snappedDestination);
+  return { points, destination: snappedDestination };
+}
+
+function buildTrackRoute(start: MapPoint, destination: MapPoint): MapPoint[] {
+  const from = nearestOval(start.x, start.z);
+  const to = nearestOval(destination.x, destination.z);
+  let delta = to.theta - from.theta;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  const steps = Math.max(2, Math.ceil(Math.abs(delta) * 30));
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const p = ovalPoint(from.theta + (delta * i) / steps);
+    return { x: p.x, z: p.z };
+  });
+}
+
+function buildCityRoute(start: MapPoint, destination: MapPoint): MapPoint[] {
+  const from = nearestCityRoad(start);
+  const to = nearestCityRoad(destination);
+  const graph = createCityRoadGraph(from, to);
+  const previous = new Int32Array(graph.nodes.length).fill(-1);
+  const distances = new Float64Array(graph.nodes.length).fill(Infinity);
+  const visited = new Uint8Array(graph.nodes.length);
+  distances[graph.startId] = 0;
+
+  for (let i = 0; i < graph.nodes.length; i++) {
+    let current = -1;
+    let best = Infinity;
+    for (let n = 0; n < graph.nodes.length; n++) {
+      if (!visited[n] && distances[n] < best) {
+        best = distances[n];
+        current = n;
+      }
+    }
+    if (current < 0 || current === graph.destinationId) break;
+    visited[current] = 1;
+    for (const edge of graph.nodes[current].edges) {
+      const nextDistance = distances[current] + edge.weight;
+      if (nextDistance < distances[edge.to]) {
+        distances[edge.to] = nextDistance;
+        previous[edge.to] = current;
+      }
+    }
+  }
+
+  const path: MapPoint[] = [];
+  let current = graph.destinationId;
+  while (current >= 0) {
+    path.unshift(graph.nodes[current].point);
+    if (current === graph.startId) break;
+    current = previous[current];
+  }
+  return path.length > 1 ? path : [from.point, to.point];
+}
+
+function nearestCityRoad(point: MapPoint): RoadProjection {
+  let best: RoadProjection = {
+    point: { x: 0, z: RING_RADIUS },
+    distance: Infinity,
+    kind: "ring",
+    index: -1,
+    coordinate: Math.PI / 2,
+  };
+
+  ROADS.forEach((road, index) => {
+    const extent = roadExtent(road.pos);
+    const candidate = road.axis === "z"
+      ? { x: clamp(point.x, -extent, extent), z: road.pos }
+      : { x: road.pos, z: clamp(point.z, -extent, extent) };
+    const distance = Math.hypot(point.x - candidate.x, point.z - candidate.z);
+    if (distance < best.distance) {
+      best = {
+        point: candidate,
+        distance,
+        kind: "line",
+        index,
+        coordinate: road.axis === "z" ? candidate.x : candidate.z,
+      };
+    }
+  });
+
+  const length = Math.hypot(point.x, point.z) || 1;
+  const ringPoint = { x: (point.x / length) * RING_RADIUS, z: (point.z / length) * RING_RADIUS };
+  const ringDistance = Math.abs(length - RING_RADIUS);
+  if (ringDistance < best.distance) {
+    best = {
+      point: ringPoint,
+      distance: ringDistance,
+      kind: "ring",
+      index: -1,
+      coordinate: Math.atan2(ringPoint.z, ringPoint.x),
+    };
+  }
+  return best;
+}
+
+function createCityRoadGraph(start: RoadProjection, destination: RoadProjection) {
+  const nodes: RouteNode[] = [];
+  const nodeIds = new Map<string, number>();
+  const lineRefs: RoadRef[][] = ROADS.map(() => []);
+  const ringRefs: RoadRef[] = [];
+
+  const pointKey = (point: MapPoint) => `${Math.round(point.x * 100)}:${Math.round(point.z * 100)}`;
+  const addNode = (point: MapPoint) => {
+    const key = pointKey(point);
+    const existing = nodeIds.get(key);
+    if (existing !== undefined) return existing;
+    const id = nodes.push({ point, edges: [] }) - 1;
+    nodeIds.set(key, id);
+    return id;
+  };
+  const addRef = (refs: RoadRef[], id: number, coordinate: number) => {
+    if (!refs.some((ref) => ref.id === id)) refs.push({ id, coordinate });
+  };
+
+  for (let i = 0; i < ROADS.length; i++) {
+    for (let j = i + 1; j < ROADS.length; j++) {
+      if (ROADS[i].axis === ROADS[j].axis) continue;
+      const x = ROADS[i].axis === "x" ? ROADS[i].pos : ROADS[j].pos;
+      const z = ROADS[i].axis === "z" ? ROADS[i].pos : ROADS[j].pos;
+      const point = { x, z };
+      if (!onRoadSegment(ROADS[i], point) || !onRoadSegment(ROADS[j], point)) continue;
+      const id = addNode(point);
+      addRef(lineRefs[i], id, ROADS[i].axis === "z" ? x : z);
+      addRef(lineRefs[j], id, ROADS[j].axis === "z" ? x : z);
+    }
+  }
+
+  for (let i = 0; i < ROADS.length; i++) {
+    const road = ROADS[i];
+    const inside = RING_RADIUS * RING_RADIUS - road.pos * road.pos;
+    if (inside <= 0) continue;
+    const offset = Math.sqrt(inside);
+    const crossings = road.axis === "z"
+      ? [{ x: -offset, z: road.pos }, { x: offset, z: road.pos }]
+      : [{ x: road.pos, z: -offset }, { x: road.pos, z: offset }];
+    for (const point of crossings) {
+      if (!onRoadSegment(road, point)) continue;
+      const id = addNode(point);
+      addRef(lineRefs[i], id, road.axis === "z" ? point.x : point.z);
+      addRef(ringRefs, id, Math.atan2(point.z, point.x));
+    }
+  }
+
+  for (let i = 0; i < 96; i++) {
+    const angle = (i / 96) * Math.PI * 2;
+    const point = { x: Math.cos(angle) * RING_RADIUS, z: Math.sin(angle) * RING_RADIUS };
+    addRef(ringRefs, addNode(point), angle);
+  }
+
+  const addProjection = (projection: RoadProjection) => {
+    const id = addNode(projection.point);
+    if (projection.kind === "line") addRef(lineRefs[projection.index], id, projection.coordinate);
+    else addRef(ringRefs, id, normalizeAngle(projection.coordinate));
+    return id;
+  };
+  const startId = addProjection(start);
+  const destinationId = addProjection(destination);
+
+  const connect = (a: number, b: number) => {
+    if (a === b) return;
+    const weight = Math.hypot(nodes[a].point.x - nodes[b].point.x, nodes[a].point.z - nodes[b].point.z);
+    nodes[a].edges.push({ to: b, weight });
+    nodes[b].edges.push({ to: a, weight });
+  };
+  const connectOrdered = (refs: RoadRef[], closed: boolean) => {
+    const ordered = [...refs].sort((a, b) => a.coordinate - b.coordinate);
+    for (let i = 1; i < ordered.length; i++) connect(ordered[i - 1].id, ordered[i].id);
+    if (closed && ordered.length > 1) connect(ordered[ordered.length - 1].id, ordered[0].id);
+  };
+  for (let i = 0; i < lineRefs.length; i++) connectOrdered(lineRefs[i], false);
+  connectOrdered(ringRefs.map((ref) => ({ ...ref, coordinate: normalizeAngle(ref.coordinate) })), true);
+
+  return { nodes, startId, destinationId };
+}
+
+function onRoadSegment(road: { axis: "x" | "z"; pos: number }, point: MapPoint) {
+  const extent = roadExtent(road.pos);
+  return road.axis === "z"
+    ? Math.abs(point.z - road.pos) < 0.01 && Math.abs(point.x) <= extent + 0.01
+    : Math.abs(point.x - road.pos) < 0.01 && Math.abs(point.z) <= extent + 0.01;
+}
+
+function normalizeAngle(angle: number) {
+  const normalized = angle % (Math.PI * 2);
+  return normalized < 0 ? normalized + Math.PI * 2 : normalized;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
 

@@ -168,6 +168,23 @@ export class GameEngine {
   private playerWheelR = 0.34;
   private wheelSpin = 0;
   private yawVel = 0;
+  private routeGroup = new THREE.Group();
+  private routeGlowMat = new THREE.MeshBasicMaterial({
+    color: 0x00bfff,
+    transparent: true,
+    opacity: 0.3,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  });
+  private routeCoreMat = new THREE.MeshBasicMaterial({
+    color: 0x63edff,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  });
 
   private blobShadow!: THREE.Mesh;
   private world!: WorldRefs;
@@ -251,6 +268,8 @@ export class GameEngine {
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
+    this.routeGroup.renderOrder = 5;
+    this.scene.add(this.routeGroup);
     this.camera = new THREE.PerspectiveCamera(
       this.fov,
       container.clientWidth / container.clientHeight,
@@ -572,6 +591,66 @@ export class GameEngine {
   }
   setCameraSettings(patch: Partial<CameraSettings>) {
     this.camCtl.updateSettings(patch);
+  }
+
+  /** Draw the current road route directly on the driving surface. */
+  setRoute(points: Array<{ x: number; z: number }> | null) {
+    this.clearRoute();
+    if (!points || points.length < 2) return;
+
+    const validPoints = points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.z));
+    if (validPoints.length < 2) return;
+    this.routeGroup.add(new THREE.Mesh(this.routeStripGeometry(validPoints, 1.8), this.routeGlowMat));
+    this.routeGroup.add(new THREE.Mesh(this.routeStripGeometry(validPoints, 0.72), this.routeCoreMat));
+  }
+
+  private clearRoute() {
+    while (this.routeGroup.children.length) {
+      const child = this.routeGroup.children.pop();
+      if (!child) continue;
+      child.parent = null;
+      const mesh = child as THREE.Mesh;
+      mesh.geometry?.dispose();
+    }
+  }
+
+  private routeStripGeometry(points: Array<{ x: number; z: number }>, width: number) {
+    const positions: number[] = [];
+    const indices: number[] = [];
+    let vertexCount = 0;
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const length = Math.hypot(dx, dz);
+      if (length < 0.01) continue;
+      const half = width / 2;
+      const nx = (-dz / length) * half;
+      const nz = (dx / length) * half;
+      const ay = this.routeHeightAt(a.x, a.z);
+      const by = this.routeHeightAt(b.x, b.z);
+      positions.push(
+        a.x + nx, ay, a.z + nz,
+        a.x - nx, ay, a.z - nz,
+        b.x - nx, by, b.z - nz,
+        b.x + nx, by, b.z + nz,
+      );
+      indices.push(
+        vertexCount, vertexCount + 1, vertexCount + 2,
+        vertexCount, vertexCount + 2, vertexCount + 3,
+      );
+      vertexCount += 4;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    return geometry;
+  }
+
+  private routeHeightAt(x: number, z: number) {
+    if (!this.isTrackMode) return 0.095;
+    return nearestOval(x, z).y + 0.18;
   }
 
   private input(a: ControlAction): boolean {
@@ -1631,6 +1710,8 @@ export class GameEngine {
       if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
       else if (mat) (mat as THREE.Material).dispose();
     });
+    this.routeGlowMat.dispose();
+    this.routeCoreMat.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);
