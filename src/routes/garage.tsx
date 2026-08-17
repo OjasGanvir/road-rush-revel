@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   ArrowLeft,
@@ -12,6 +12,8 @@ import {
   Activity,
   Sparkles,
   ShoppingBag,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { CarPreview } from "../components/game/CarPreview";
 import { Button } from "../components/ui/button";
@@ -51,6 +53,7 @@ function Garage() {
   const profile = useProfile();
 
   const [activeTab, setActiveTab] = useState<string>("cars");
+  const [carFilter, setCarFilter] = useState<"owned" | "all">("all");
   const [previewCarId, setPreviewCarId] = useState<string>(profile.selectedCar);
   const [previewPaintId, setPreviewPaintId] = useState<string>(profile.selectedPaint);
   const [previewWheelId, setPreviewWheelId] = useState<string>(profile.selectedWheel);
@@ -154,8 +157,9 @@ function Garage() {
           </div>
         </div>
 
-        {/* Full Screen Grid Layout (Occupies 100% Width & Height, No Outer Scroll) */}
-        <div className="flex-1 w-full p-3 sm:p-4 min-h-0 overflow-hidden grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4">
+        {/* Showroom + customization area */}
+        <div className="flex-1 w-full p-3 sm:p-4 min-h-0 overflow-hidden flex flex-col gap-3 sm:gap-4">
+          <div className="min-h-0 flex-1 w-full grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4">
           {/* Left Column: Interactive 3D Stage & Vehicle Specs */}
           <div className="lg:col-span-7 xl:col-span-8 flex flex-col gap-3 min-h-0 h-full">
             {/* 3D Stage Container */}
@@ -212,40 +216,29 @@ function Garage() {
               )}
             </div>
 
-            {/* Vehicle Specs Bar */}
+          </div>
+
+          {/* Right Column: selected car details only */}
+          <div className="lg:col-span-5 xl:col-span-4 flex min-h-0 h-full flex-col gap-3 rounded-2xl sm:rounded-3xl border border-slate-200 bg-white/80 p-3 sm:p-4 backdrop-blur shadow-xl overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-[#4d7cff]">Selected ride</p>
+                <h2 className="text-xl font-extrabold text-slate-900">Car Details</h2>
+              </div>
+              <span className="rounded-full bg-[#eef3ff] px-2.5 py-1 text-[10px] font-black uppercase text-[#315fd1]">{previewCar.name}</span>
+            </div>
             <CarSpecsPanel car={previewCar} equippedCar={equippedCar} isPreviewingDifferent={previewCar.id !== profile.selectedCar} />
           </div>
 
-          {/* Right Column: Customization & Upgrade Shop Panel */}
-          <div className="lg:col-span-5 xl:col-span-4 flex flex-col gap-3 min-h-0 h-full rounded-2xl sm:rounded-3xl border border-slate-200 bg-white/80 p-3 sm:p-4 backdrop-blur shadow-xl overflow-hidden">
-            <Tabs defaultValue="cars" value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
-              <TabsList className="grid w-full grid-cols-5 bg-slate-100 border border-slate-200 p-1 rounded-2xl flex-shrink-0">
-                <TabsTrigger value="cars" className="rounded-xl text-xs font-extrabold data-[state=active]:bg-[#4d7cff] data-[state=active]:text-white">Cars</TabsTrigger>
+          {/* Hidden legacy shop markup is replaced by the bottom dock below. */}
+          <div className="hidden">
+            <Tabs defaultValue="paint" value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
+              <TabsList className="grid w-full grid-cols-4 bg-slate-100 border border-slate-200 p-1 rounded-2xl flex-shrink-0">
                 <TabsTrigger value="paint" className="rounded-xl text-xs font-extrabold data-[state=active]:bg-[#4d7cff] data-[state=active]:text-white">Paint</TabsTrigger>
                 <TabsTrigger value="wheels" className="rounded-xl text-xs font-extrabold data-[state=active]:bg-[#4d7cff] data-[state=active]:text-white">Wheels</TabsTrigger>
                 <TabsTrigger value="trails" className="rounded-xl text-xs font-extrabold data-[state=active]:bg-[#4d7cff] data-[state=active]:text-white">Nitro</TabsTrigger>
                 <TabsTrigger value="upg" className="rounded-xl text-xs font-extrabold data-[state=active]:bg-[#4d7cff] data-[state=active]:text-white">Upgrades</TabsTrigger>
               </TabsList>
-
-              {/* Cars Tab */}
-              <TabsContent value="cars" className="mt-3 flex-1 min-h-0 overflow-y-auto pr-1 grid grid-cols-2 gap-2.5">
-                {CARS.map((c) => {
-                  const owned = profile.owned.cars.includes(c.id);
-                  const equipped = profile.selectedCar === c.id;
-                  const previewing = previewCarId === c.id;
-                  return (
-                    <CarShopCard
-                      key={c.id}
-                      car={c}
-                      owned={owned}
-                      equipped={equipped}
-                      previewing={previewing}
-                      canAfford={profile.coins >= c.price}
-                      onSelect={() => setPreviewCarId(c.id)}
-                    />
-                  );
-                })}
-              </TabsContent>
 
               {/* Paint Tab */}
               <TabsContent value="paint" className="mt-3 flex-1 min-h-0 overflow-y-auto pr-1 grid grid-cols-3 gap-2.5">
@@ -376,9 +369,321 @@ function Garage() {
               </TabsContent>
             </Tabs>
           </div>
+
+          </div>
+
+          <GarageBottomDock
+            cars={CARS}
+            profile={profile}
+            previewCarId={previewCarId}
+            activeTab={activeTab}
+            carFilter={carFilter}
+            onTabChange={setActiveTab}
+            onCarFilterChange={setCarFilter}
+            onSelectCar={setPreviewCarId}
+            previewPaintId={previewPaintId}
+            onSelectPaint={setPreviewPaintId}
+            previewWheelId={previewWheelId}
+            onSelectWheel={setPreviewWheelId}
+            previewTrailId={previewTrailId}
+            onSelectTrail={setPreviewTrailId}
+            onUpgrade={upgrade}
+          />
         </div>
       </div>
     </>
+  );
+}
+
+function GarageBottomDock({
+  cars,
+  profile,
+  previewCarId,
+  activeTab,
+  carFilter,
+  onTabChange,
+  onCarFilterChange,
+  onSelectCar,
+  previewPaintId,
+  onSelectPaint,
+  previewWheelId,
+  onSelectWheel,
+  previewTrailId,
+  onSelectTrail,
+  onUpgrade,
+}: {
+  cars: CarDef[];
+  profile: Profile;
+  previewCarId: string;
+  activeTab: string;
+  carFilter: "owned" | "all";
+  onTabChange: (tab: string) => void;
+  onCarFilterChange: (filter: "owned" | "all") => void;
+  onSelectCar: (id: string) => void;
+  previewPaintId: string;
+  onSelectPaint: (id: string) => void;
+  previewWheelId: string;
+  onSelectWheel: (id: string) => void;
+  previewTrailId: string;
+  onSelectTrail: (id: string) => void;
+  onUpgrade: (id: keyof Profile["upgrades"], max: number, costs: number[]) => void;
+}) {
+  const tabs = [
+    { id: "cars", label: "Cars" },
+    { id: "paint", label: "Paint" },
+    { id: "wheels", label: "Wheels" },
+    { id: "trails", label: "Nitro" },
+    { id: "upg", label: "Upgrades" },
+  ];
+  const visibleCars = carFilter === "owned" ? cars.filter((car) => profile.owned.cars.includes(car.id)) : cars;
+  const itemsScrollRef = useRef<HTMLDivElement>(null);
+
+  const scrollItems = (direction: -1 | 1) => {
+    itemsScrollRef.current?.scrollBy({ left: direction * 240, behavior: "smooth" });
+  };
+
+  return (
+    <section className="flex min-h-[164px] flex-shrink-0 flex-col gap-2 rounded-2xl border border-slate-200 bg-white/90 p-2.5 shadow-lg backdrop-blur-md sm:min-h-[176px] sm:p-3">
+      <div className="flex items-center justify-between gap-2 overflow-x-auto">
+        <div className="flex shrink-0 gap-1 rounded-xl bg-slate-100 p-1">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onTabChange(tab.id)}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition-colors sm:text-xs ${activeTab === tab.id ? "bg-[#172554] text-white shadow-sm" : "text-slate-500 hover:bg-white"}`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === "cars" && (
+          <div className="flex shrink-0 gap-1 rounded-xl bg-[#eef3ff] p-1">
+            <button
+              type="button"
+              aria-pressed={carFilter === "owned"}
+              onClick={() => onCarFilterChange("owned")}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition-colors ${carFilter === "owned" ? "bg-[#4d7cff] text-white shadow-sm" : "text-[#315fd1] hover:bg-white"}`}
+            >
+              Owned Cars
+            </button>
+            <button
+              type="button"
+              aria-pressed={carFilter === "all"}
+              onClick={() => onCarFilterChange("all")}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-black transition-colors ${carFilter === "all" ? "bg-[#4d7cff] text-white shadow-sm" : "text-[#315fd1] hover:bg-white"}`}
+            >
+              All Cars
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="relative min-h-0 flex-1">
+        <button
+          type="button"
+          aria-label="Scroll items left"
+          onClick={() => scrollItems(-1)}
+          className="pointer-events-auto absolute left-0 top-1/2 z-10 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-700 shadow-md transition hover:bg-[#eef3ff] hover:text-[#315fd1] active:scale-90"
+        >
+          <ChevronLeft className="h-5 w-5" />
+        </button>
+        <button
+          type="button"
+          aria-label="Scroll items right"
+          onClick={() => scrollItems(1)}
+          className="pointer-events-auto absolute right-0 top-1/2 z-10 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-700 shadow-md transition hover:bg-[#eef3ff] hover:text-[#315fd1] active:scale-90"
+        >
+          <ChevronRight className="h-5 w-5" />
+        </button>
+
+        <div
+          ref={itemsScrollRef}
+          className="flex h-full min-h-0 gap-2 overflow-x-auto overflow-y-hidden px-10 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+
+        {activeTab === "cars" && visibleCars.map((car) => (
+          <CarShopCard
+            key={car.id}
+            car={car}
+            owned={profile.owned.cars.includes(car.id)}
+            equipped={profile.selectedCar === car.id}
+            previewing={previewCarId === car.id}
+            canAfford={profile.coins >= car.price}
+            onSelect={() => onSelectCar(car.id)}
+          />
+        ))}
+
+        {activeTab === "paint" && PAINTS.map((paint) => (
+          <CosmeticCard
+            key={paint.id}
+            title={paint.name}
+            price={paint.price}
+            owned={profile.owned.paints.includes(paint.id)}
+            equipped={profile.selectedPaint === paint.id}
+            previewing={previewPaintId === paint.id}
+            canAfford={profile.coins >= paint.price}
+            swatch={paint.value}
+            onSelect={() => onSelectPaint(paint.id)}
+          />
+        ))}
+
+        {activeTab === "wheels" && WHEELS.map((wheel) => (
+          <WheelShopCard
+            key={wheel.id}
+            wheel={wheel}
+            owned={profile.owned.wheels.includes(wheel.id)}
+            equipped={profile.selectedWheel === wheel.id}
+            previewing={previewWheelId === wheel.id}
+            canAfford={profile.coins >= wheel.price}
+            onSelect={() => onSelectWheel(wheel.id)}
+          />
+        ))}
+
+        {activeTab === "trails" && TRAILS.map((trail) => (
+          <CosmeticCard
+            key={trail.id}
+            title={trail.name}
+            price={trail.price}
+            owned={profile.owned.trails.includes(trail.id)}
+            equipped={profile.selectedTrail === trail.id}
+            previewing={previewTrailId === trail.id}
+            canAfford={profile.coins >= trail.price}
+            swatch={trail.trailColor ?? "#cbd5e1"}
+            onSelect={() => onSelectTrail(trail.id)}
+          />
+        ))}
+
+        {activeTab === "upg" && UPGRADES.map((upgrade) => (
+          <UpgradeDockCard
+            key={upgrade.id}
+            upgrade={upgrade}
+            level={profile.upgrades[upgrade.id]}
+            canAfford={profile.coins >= (profile.upgrades[upgrade.id] >= upgrade.maxLevel ? 0 : upgrade.costs[profile.upgrades[upgrade.id]])}
+            onUpgrade={() => onUpgrade(upgrade.id, upgrade.maxLevel, upgrade.costs)}
+          />
+        ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function UpgradeDockCard({
+  upgrade,
+  level,
+  canAfford,
+  onUpgrade,
+}: {
+  upgrade: (typeof UPGRADES)[number];
+  level: number;
+  canAfford: boolean;
+  onUpgrade: () => void;
+}) {
+  const maxed = level >= upgrade.maxLevel;
+  const cost = maxed ? 0 : upgrade.costs[level];
+  return (
+    <div className="flex w-[220px] min-w-[220px] flex-none flex-col justify-between rounded-2xl border border-slate-200 bg-white/90 p-3 shadow-md">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="truncate text-xs font-black text-slate-900">{upgrade.name}</h3>
+          <p className="mt-0.5 line-clamp-2 text-[10px] font-semibold leading-tight text-slate-500">{upgrade.description}</p>
+        </div>
+        <span className="shrink-0 text-[10px] font-black text-[#4d7cff]">Lv {level}/{upgrade.maxLevel}</span>
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <div className="flex flex-1 gap-1">
+          {Array.from({ length: upgrade.maxLevel }).map((_, i) => (
+            <span key={i} className={`h-1.5 flex-1 rounded-full ${i < level ? "bg-[#4d7cff]" : "bg-slate-200"}`} />
+          ))}
+        </div>
+        <Button size="sm" disabled={maxed || !canAfford} onClick={onUpgrade} className="h-7 rounded-lg bg-[#172554] px-2 text-[10px] font-black text-white disabled:opacity-40">
+          {maxed ? "Max" : <><Coins className="mr-1 h-3 w-3 text-[#ffcf3f]" />{cost}</>}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function CarCollectionDock({
+  cars,
+  profile,
+  previewCarId,
+  showOwnedCars,
+  onToggleOwned,
+  onSelect,
+  onEquip,
+  onBuy,
+}: {
+  cars: CarDef[];
+  profile: Profile;
+  previewCarId: string;
+  showOwnedCars: boolean;
+  onToggleOwned: () => void;
+  onSelect: (id: string) => void;
+  onEquip: () => void;
+  onBuy: () => void;
+}) {
+  const visibleCars = showOwnedCars ? cars.filter((car) => profile.owned.cars.includes(car.id)) : cars;
+  const previewCar = getCar(previewCarId);
+  const owned = profile.owned.cars.includes(previewCar.id);
+  const equipped = profile.selectedCar === previewCar.id;
+  const canAfford = profile.coins >= previewCar.price;
+
+  return (
+    <section className="flex min-h-[132px] flex-shrink-0 flex-col gap-2 rounded-2xl border border-slate-200 bg-white/90 p-2.5 shadow-lg backdrop-blur-md sm:min-h-[150px] sm:p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="truncate text-xs font-black uppercase tracking-[0.16em] text-slate-900 sm:text-sm">Car Collection</h2>
+            <span className="hidden rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-extrabold text-slate-500 sm:inline-flex">
+              {visibleCars.length} cars
+            </span>
+          </div>
+          <p className="hidden text-[10px] font-semibold text-slate-400 sm:block">Scroll sideways to browse your next ride.</p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {equipped ? (
+            <span className="hidden items-center gap-1 rounded-lg bg-[#43d675]/15 px-2 py-1 text-[10px] font-black text-[#23934c] sm:flex">
+              <Check className="h-3 w-3" /> Equipped
+            </span>
+          ) : owned ? (
+            <Button size="sm" onClick={onEquip} className="h-8 rounded-lg bg-[#4d7cff] px-3 text-[10px] font-black text-white hover:bg-[#3b68e6]">
+              Equip
+            </Button>
+          ) : (
+            <Button size="sm" disabled={!canAfford} onClick={onBuy} className="h-8 rounded-lg bg-[#ffcf3f] px-3 text-[10px] font-black text-[#33200a] hover:bg-[#ffb91f] disabled:opacity-50">
+              <Coins className="mr-1 h-3 w-3" /> {previewCar.price}
+            </Button>
+          )}
+          <button
+            type="button"
+            aria-pressed={showOwnedCars}
+            onClick={onToggleOwned}
+            className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-[10px] font-black transition-colors ${showOwnedCars ? "border-[#4d7cff] bg-[#4d7cff] text-white" : "border-[#4d7cff]/30 bg-[#eef3ff] text-[#315fd1] hover:bg-[#e1eaff]"}`}
+          >
+            <Check className="h-3.5 w-3.5" />
+            {showOwnedCars ? "All Cars" : "Owned Cars"}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-1 gap-2 overflow-x-auto overflow-y-hidden pb-1 [scrollbar-width:thin]">
+        {visibleCars.map((car) => (
+          <CarShopCard
+            key={car.id}
+            car={car}
+            owned={profile.owned.cars.includes(car.id)}
+            equipped={profile.selectedCar === car.id}
+            previewing={previewCarId === car.id}
+            canAfford={profile.coins >= car.price}
+            onSelect={() => onSelect(car.id)}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -535,7 +840,7 @@ function CarShopCard({
   return (
     <button
       onClick={onSelect}
-      className={`relative flex flex-col items-center gap-1.5 rounded-2xl border-2 bg-white/90 p-3 shadow-md transition-all active:scale-95 ${
+      className={`relative flex w-[148px] min-w-[148px] flex-none flex-col items-center gap-1.5 rounded-2xl border-2 bg-white/90 p-3 shadow-md transition-all active:scale-95 ${
         previewing
           ? "border-[#4d7cff] bg-[#4d7cff]/10 shadow-[0_0_15px_rgba(77,124,255,0.3)]"
           : "border-slate-200 hover:border-slate-300"
@@ -594,7 +899,7 @@ function WheelShopCard({
   return (
     <button
       onClick={onSelect}
-      className={`relative flex flex-col items-center gap-1.5 rounded-2xl border-2 bg-white/90 p-3 shadow-md transition-all active:scale-95 ${
+      className={`relative flex w-[148px] min-w-[148px] flex-none flex-col items-center gap-1.5 rounded-2xl border-2 bg-white/90 p-3 shadow-md transition-all active:scale-95 ${
         previewing
           ? "border-[#4d7cff] bg-[#4d7cff]/10 shadow-[0_0_15px_rgba(77,124,255,0.3)]"
           : "border-slate-200 hover:border-slate-300"
@@ -655,7 +960,7 @@ function CosmeticCard({
   return (
     <button
       onClick={onSelect}
-      className={`relative flex flex-col items-center gap-2 rounded-2xl border-2 bg-white/90 p-3 shadow-md transition-all active:scale-95 ${
+      className={`relative flex w-[148px] min-w-[148px] flex-none flex-col items-center gap-2 rounded-2xl border-2 bg-white/90 p-3 shadow-md transition-all active:scale-95 ${
         previewing
           ? "border-[#4d7cff] bg-[#4d7cff]/10 shadow-[0_0_15px_rgba(77,124,255,0.3)]"
           : "border-slate-200 hover:border-slate-300"
