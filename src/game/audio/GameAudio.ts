@@ -19,6 +19,11 @@ export class GameAudio {
   private driftGain: GainNode | null = null;
   private driftFilter: BiquadFilterNode | null = null;
 
+  // Crowd ambience (low-passed noise with a slow swell)
+  private noiseBuf: AudioBuffer | null = null;
+  private crowdSrc: AudioBufferSourceNode | null = null;
+  private crowdGain: GainNode | null = null;
+
   // Nitro whoosh
   private nitroGain: GainNode | null = null;
 
@@ -68,6 +73,7 @@ export class GameAudio {
       const buffer = ctx.createBuffer(1, ctx.sampleRate * 1, ctx.sampleRate);
       const data = buffer.getChannelData(0);
       for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      this.noiseBuf = buffer;
       this.noiseSrc = ctx.createBufferSource();
       this.noiseSrc.buffer = buffer;
       this.noiseSrc.loop = true;
@@ -81,6 +87,27 @@ export class GameAudio {
       this.driftFilter.connect(this.driftGain);
       this.driftGain.connect(this.master);
       this.noiseSrc.start();
+
+      // Crowd ambience: rumbling low-passed noise with a slow swell
+      this.crowdSrc = ctx.createBufferSource();
+      this.crowdSrc.buffer = buffer;
+      this.crowdSrc.loop = true;
+      const crowdFilter = ctx.createBiquadFilter();
+      crowdFilter.type = "lowpass";
+      crowdFilter.frequency.value = 480;
+      this.crowdGain = ctx.createGain();
+      this.crowdGain.gain.value = 0;
+      this.crowdSrc.connect(crowdFilter);
+      crowdFilter.connect(this.crowdGain);
+      this.crowdGain.connect(this.master);
+      this.crowdSrc.start();
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.13;
+      const lfoGain = ctx.createGain();
+      lfoGain.gain.value = 0.03;
+      lfo.connect(lfoGain);
+      lfoGain.connect(this.crowdGain.gain);
+      lfo.start();
 
       this.started = true;
     } catch {
@@ -111,6 +138,32 @@ export class GameAudio {
     if (!this.ctx || !this.driftGain) return;
     const t = this.ctx.currentTime;
     this.driftGain.gain.setTargetAtTime(active ? 0.08 + intensity * 0.12 : 0, t, 0.05);
+  }
+
+  /** Crowd roar intensity 0..1 (track mode, near the grandstands / pit lane). */
+  crowd(intensity: number) {
+    if (!this.ctx || !this.crowdGain) return;
+    const t = this.ctx.currentTime;
+    this.crowdGain.gain.setTargetAtTime(Math.min(0.2, Math.max(0, intensity) * 0.16), t, 0.5);
+  }
+
+  /** Short air-gun ratchet click for pit stops. */
+  pitClick() {
+    if (!this.ctx || !this.master || !this.noiseBuf) return;
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = "bandpass";
+    f.frequency.value = 2400 + Math.random() * 1200;
+    f.Q.value = 7;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.12, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+    src.connect(f);
+    f.connect(g);
+    g.connect(this.master);
+    src.start(t, Math.random() * 0.5, 0.08);
   }
 
   coin() {
@@ -186,6 +239,7 @@ export class GameAudio {
       this.engineOsc?.stop();
       this.engineSub?.stop();
       this.noiseSrc?.stop();
+      this.crowdSrc?.stop();
     } catch {
       /* noop */
     }

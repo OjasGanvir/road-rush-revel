@@ -16,6 +16,8 @@ import {
 import {
   bankHeight,
   buildTrack,
+  inPitCore,
+  inPitZone,
   isOnTrackAt,
   nearestOval,
   ovalPoint,
@@ -142,6 +144,10 @@ type Traffic = {
   pitIn?: number;
   /** Track mode: currently running through the pit lane. */
   pitting?: boolean;
+  /** Track mode: assigned pit box index. */
+  pitBox?: number;
+  /** Track mode: box hold state (-1 pending, >0 holding, -2 serviced). */
+  pitHold?: number;
   /** Cruising speed to return to after a pit stop. */
   baseSpeed?: number;
 };
@@ -465,6 +471,8 @@ export class GameEngine {
           steerPivots,
           pitIn: 25 + Math.random() * 60,
           pitting: false,
+          pitBox: i % PIT.boxes,
+          pitHold: -1,
         });
         continue;
       }
@@ -713,6 +721,7 @@ export class GameEngine {
     this.updatePeds(sdt);
     this.updateParticles(dt);
     this.updateSkidFade(dt);
+    if (this.isTrackMode) this.world.updatePitScene?.(dt, this.pitBoxIdx);
     this.updateCamera(dt);
     this.updateAudio();
     this.updateWear(sdt);
@@ -1185,6 +1194,7 @@ export class GameEngine {
     // Service in progress — the crew works, the car stays put.
     if (this.pitTimer > 0) {
       this.pitTimer -= dt;
+      this.pitElapsed += dt;
       this.vf = 0;
       this.vl = 0;
       const stage = Math.floor(((PIT.serviceTime - this.pitTimer) / PIT.serviceTime) * 3);
@@ -1194,12 +1204,22 @@ export class GameEngine {
         this.cb.onPopup?.(labels[Math.min(2, stage)], "stunt");
         this.cb.onEvent?.("coin");
       }
+      // Air-gun ratchet clicks while the crew swarms the car.
+      this.pitClickCool -= dt;
+      if (this.pitClickCool <= 0) {
+        this.pitClickCool = 0.3 + Math.random() * 0.14;
+        this.audio.pitClick();
+      }
       if (this.pitTimer <= 0) {
         this.nitroCharge = 1;
         this.fuel = 1;
         this.tyres = 1;
         this.pitDone = true;
-        this.cb.onPopup?.("PIT STOP COMPLETE — GO!", "stunt");
+        this.cb.onPopup?.(
+          `PIT STOP COMPLETE — ${this.pitElapsed.toFixed(1)}s — GO!`,
+          "stunt",
+        );
+        this.pitBoxIdx = -1;
       }
       return true;
     }
@@ -1212,19 +1232,25 @@ export class GameEngine {
     }
     if (!this.inPitLane) {
       this.inPitLane = true;
-      this.cb.onPopup?.("PIT LANE — LIMITER ON", "stunt");
+      this.cb.onPopup?.(
+        pit.box >= 0 ? `PIT LANE — LIMITER ON · BOX ${pit.box + 1}` : "PIT LANE — LIMITER ON",
+        "stunt",
+      );
     }
     // Automatic pit-lane speed limiter.
     if (this.vf > PIT.speedLimit) this.vf += (PIT.speedLimit - this.vf) * Math.min(1, dt * 3.5);
     if (this.vf < -PIT.speedLimit * 0.5) this.vf = -PIT.speedLimit * 0.5;
 
-    // Stopped in a box -> service starts automatically.
-    if (pit.box === 0 && !this.pitDone && Math.abs(this.vf) < 4) {
+    // Stopped alongside a box -> the crew services the car automatically.
+    if (pit.box >= 0 && !this.pitDone && Math.abs(this.vf) < 4) {
       const box = pitBoxPoint(pit.box);
       this.px = box.x;
       this.pz = box.z;
+      this.heading = headingFromForward(box.tx, box.tz);
       this.pitTimer = PIT.serviceTime;
+      this.pitElapsed = 0;
       this.pitStage = -1;
+      this.pitBoxIdx = pit.box;
       this.vf = 0;
       this.vl = 0;
     }
@@ -1245,6 +1271,23 @@ export class GameEngine {
       if (this.wallCool <= 0) {
         this.wallCool = 0.6;
         this.shake = Math.min(0.15, this.shake + 0.06);
+        this.cb.onEvent?.("bump");
+      }
+    }
+    // Concrete pit wall: keeps cars in the pit lane through the pit sector
+    // (mirrors the outer barrier on the inside of the front straight).
+    if (
+      inPitCore(near.theta) &&
+      near.lat > PIT.wallLat - 1 &&
+      near.lat < -TRACK.half - 0.05
+    ) {
+      const push = PIT.wallLat - 1 - near.lat;
+      this.px += near.nx * push;
+      this.pz += near.nz * push;
+      this.slideAlongNormal(near.nx, near.nz, 0.99);
+      if (this.wallCool <= 0) {
+        this.wallCool = 0.6;
+        this.shake = Math.min(0.15, this.shake + 0.05);
         this.cb.onEvent?.("bump");
       }
     }
@@ -1272,6 +1315,9 @@ export class GameEngine {
   private pitTimer = 0;
   private pitStage = 0;
   private pitDone = false;
+  private pitElapsed = 0;
+  private pitBoxIdx = -1;
+  private pitClickCool = 0;
 
   private isOnSand(x: number, z: number): boolean {
 
@@ -1425,22 +1471,44 @@ export class GameEngine {
         // from orientation, so rivals cannot slide or swap front and rear.
         const near = nearestOval(t.group.position.x, t.group.position.z);
         t.theta = near.theta;
-        // Rivals periodically peel off into the pit lane, slow to the limit,
-        // and rejoin the track at the pit exit.
+        const inCore = inPitCore(near.theta);
+        const inZone = inPitZone(near.theta);
+        // Rivals periodically peel off into the pit lane at the entry, hold
+        // at their assigned box for service, then rejoin at the pit exit.
         if (t.pitIn !== undefined && !t.pitting) {
           t.pitIn -= dt;
-          if (t.pitIn <= 0 && near.theta > PIT.thetaStart - 0.15 && near.theta < PIT.thetaStart + 0.35) {
+          if (
+            t.pitIn <= 0 &&
+            near.theta > PIT.thetaStart - 0.1 &&
+            near.theta < PIT.thetaStart + PIT.mergeZone + 0.25
+          ) {
             t.pitting = true;
           }
         }
-        const inPitSector = near.theta <= PIT.thetaStart && near.theta >= PIT.thetaEnd;
-        if (t.pitting && !inPitSector && (t.pitIn ?? 0) <= 0) {
+        if (t.pitting && !inZone) {
           t.pitting = false;
-          t.pitIn = 60 + Math.random() * 60;
+          t.pitIn = 55 + Math.random() * 70;
+          t.pitHold = -1;
+        }
+        // Hold at the assigned box for a full service.
+        let hold = false;
+        if (t.pitting && inCore && t.pitHold === -1 && t.pitBox !== undefined) {
+          const boxTheta =
+            PIT.thetaStart - ((t.pitBox + 0.5) / PIT.boxes) * (PIT.thetaStart - PIT.thetaEnd);
+          if (Math.abs(near.theta - boxTheta) < 0.05) t.pitHold = 2.2;
+        }
+        if (t.pitHold !== undefined && t.pitHold > 0) {
+          t.pitHold -= dt;
+          hold = true;
+          if (t.pitHold <= 0) t.pitHold = -2;
         }
         const laneTarget = t.pitting ? PIT_LAT_CENTRE : (t.lane ?? 0);
-        const targetSpeed = t.pitting && inPitSector ? PIT.speedLimit * 0.85 : t.baseSpeed ?? t.speed;
-        t.speed += (targetSpeed - t.speed) * Math.min(1, dt * 1.6);
+        const targetSpeed = hold
+          ? 0
+          : t.pitting && inZone
+            ? PIT.speedLimit * 0.9
+            : (t.baseSpeed ?? t.speed);
+        t.speed += (targetSpeed - t.speed) * Math.min(1, dt * (hold ? 7 : 1.6));
         const target = ovalPoint(near.theta - 0.12, laneTarget);
         this.steerNpc(
           t,
@@ -1450,9 +1518,11 @@ export class GameEngine {
           ),
           dt,
         );
-        const forward = forwardFromHeading(t.heading);
-        t.group.position.x += forward.x * t.speed * dt;
-        t.group.position.z += forward.z * t.speed * dt;
+        if (!hold) {
+          const forward = forwardFromHeading(t.heading);
+          t.group.position.x += forward.x * t.speed * dt;
+          t.group.position.z += forward.z * t.speed * dt;
+        }
         const corrected = nearestOval(t.group.position.x, t.group.position.z);
         const lane = laneTarget;
         const laneError = corrected.lat - lane;
@@ -1460,7 +1530,7 @@ export class GameEngine {
         t.group.position.z -= corrected.nz * laneError * Math.min(1, dt * 2.5);
         // Sit on the banked surface (and stay flat down the pit lane).
         const cLat = Math.max(-TRACK.half, Math.min(TRACK.half, corrected.lat));
-        const gy = t.pitting && inPitSector ? 0 : bankHeight(corrected.theta, cLat);
+        const gy = t.pitting && inZone ? 0 : bankHeight(corrected.theta, cLat);
         t.group.position.y += (gy - t.group.position.y) * Math.min(1, dt * 6);
         if (t.cool > 0) t.cool -= dt;
         this.resolveTrafficHit(t, dt);
@@ -1686,6 +1756,13 @@ export class GameEngine {
   private updateAudio() {
     const speedN = Math.min(1, Math.abs(this.vf) / this.config.car.topSpeed);
     this.audio.engine(speedN, this.input("accel"));
+    if (this.isTrackMode) {
+      // Crowd roar rises near the front-straight grandstands and pit lane.
+      const prox = Math.max(0, 1 - Math.abs(this.pz - TRACK.az) / 240);
+      this.audio.crowd(prox * (0.45 + speedN * 0.55));
+    } else {
+      this.audio.crowd(0);
+    }
   }
 
   private onResize = () => {

@@ -29,6 +29,8 @@ export type WorldRefs = {
   /** Dedicated stunt park (ramps / barriers live only here). */
   stuntZone: { x: number; z: number; radius: number };
   applyTimeOfDay: (t: TimeOfDayDef) => void;
+  /** Track mode only: animates pit crews + flags. activeBox = player's box, or -1. */
+  updatePitScene?: (dt: number, activeBox: number) => void;
 };
 
 /** Island radius. */

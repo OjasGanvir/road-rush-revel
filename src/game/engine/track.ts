@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { TimeOfDayDef } from "../config/timeofday";
-import type { WorldRefs } from "./world";
+import type { WorldRefs, Box } from "./world";
 
 /** NASCAR-style oval: long straights along X, banked turns at each end. */
 export const TRACK = { ax: 215, az: 130, half: 22 };
@@ -99,38 +99,50 @@ export function isOnTrackAt(x: number, z: number): boolean {
 
 /** Pit lane runs along the inside of the front straight (theta ≈ PI/2). */
 export const PIT = {
-  /** Angular sector of the pit lane (entry -> exit), along the front straight. */
+  /** Angular sector of the pit lane. Cars enter at thetaStart, exit at thetaEnd. */
   thetaStart: Math.PI / 2 + 0.82,
   thetaEnd: Math.PI / 2 - 0.82,
   /** Lateral band, measured from the track centre line (negative = inside). */
-  latInner: -(TRACK.half + 24),
-  latOuter: -(TRACK.half + 8),
+  latInner: -(TRACK.half + 19),
+  latOuter: -(TRACK.half + 3),
   /** Automatic speed limit inside the lane (engine units). */
   speedLimit: 13,
   boxes: 6,
   /** Seconds a full service takes. */
   serviceTime: 3,
+  /** Angular length of the curved pit entry / exit merge wedges. */
+  mergeZone: 0.5,
+  /** Lateral offset of the concrete pit wall (between the lane and the track). */
+  wallLat: -(TRACK.half + 1.2),
 };
 
 export const PIT_LAT_CENTRE = (PIT.latInner + PIT.latOuter) / 2;
 
-/** Is theta inside the pit-lane sector (which straddles theta = PI/2)? */
-function inPitSector(theta: number) {
+/** Inside the core pit sector (boxes, wall, speed limit)? */
+export function inPitCore(theta: number) {
   return theta <= PIT.thetaStart && theta >= PIT.thetaEnd;
+}
+
+/** Inside the pit zone including the curved entry / exit merges? */
+export function inPitZone(theta: number) {
+  return theta <= PIT.thetaStart + PIT.mergeZone && theta >= PIT.thetaEnd - PIT.mergeZone;
 }
 
 /** Pit-lane query for a world position. */
 export function pitLaneAt(x: number, z: number) {
   const near = nearestOval(x, z);
   const inside =
-    inPitSector(near.theta) && near.lat <= PIT.latOuter && near.lat >= PIT.latInner;
+    inPitZone(near.theta) && near.lat <= PIT.latOuter && near.lat >= PIT.latInner;
   if (!inside) return { inLane: false, box: -1, theta: near.theta };
-  // Which pit box are we alongside?
+  // Which pit box are we alongside? (boxes only exist in the core sector)
   const span = PIT.thetaStart - PIT.thetaEnd;
   const t = (PIT.thetaStart - near.theta) / span;
-  const box = Math.floor(t * PIT.boxes);
+  const core = inPitCore(near.theta);
+  const box = core
+    ? Math.max(0, Math.min(PIT.boxes - 1, Math.floor(t * PIT.boxes)))
+    : -1;
   const centred = Math.abs(near.lat - PIT_LAT_CENTRE) < 5;
-  return { inLane: true, box: centred ? Math.max(0, Math.min(PIT.boxes - 1, box)) : -1, theta: near.theta };
+  return { inLane: true, box: core && centred ? box : -1, theta: near.theta };
 }
 
 /** Centre of a pit box (for stopping the car / placing crew). */
@@ -202,6 +214,78 @@ function layOnTrack(mesh: THREE.Mesh, theta: number, lat: number, lift = 0.02) {
     bank,
   );
   mesh.quaternion.premultiply(q);
+}
+
+function lerp(a: number, b: number, u: number) {
+  return a + (b - a) * u;
+}
+
+/** Flat strip between two lateral-offset curves over a theta range (pit road + merges). */
+function sectorStrip(
+  thetaFrom: number,
+  thetaTo: number,
+  latA: (u: number) => number,
+  latB: (u: number) => number,
+  y: number,
+  segs = 48,
+) {
+  const pos: number[] = [];
+  for (let i = 0; i < segs; i++) {
+    const u0 = i / segs;
+    const u1 = (i + 1) / segs;
+    const ta = thetaFrom + (thetaTo - thetaFrom) * u0;
+    const tb = thetaFrom + (thetaTo - thetaFrom) * u1;
+    const a1 = ovalPoint(ta, latA(u0));
+    const a2 = ovalPoint(ta, latB(u0));
+    const b1 = ovalPoint(tb, latA(u1));
+    const b2 = ovalPoint(tb, latB(u1));
+    pos.push(a1.x, y, a1.z, b1.x, y, b1.z, a2.x, y, a2.z);
+    pos.push(b1.x, y, b1.z, b2.x, y, b2.z, a2.x, y, a2.z);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Vertical band (fence) following an oval offset over a theta range. */
+function sectorWall(
+  thetaFrom: number,
+  thetaTo: number,
+  lat: number,
+  y0: number,
+  y1: number,
+  segs = 48,
+) {
+  const pos: number[] = [];
+  for (let i = 0; i < segs; i++) {
+    const ta = thetaFrom + (thetaTo - thetaFrom) * (i / segs);
+    const tb = thetaFrom + (thetaTo - thetaFrom) * ((i + 1) / segs);
+    const pa = ovalPoint(ta, lat);
+    const pb = ovalPoint(tb, lat);
+    pos.push(pa.x, y0, pa.z, pb.x, y0, pb.z, pa.x, y1, pa.z);
+    pos.push(pb.x, y0, pb.z, pb.x, y1, pb.z, pa.x, y1, pa.z);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Offline canvas texture for trackside signage. */
+function signTexture(
+  draw: (g: CanvasRenderingContext2D, w: number, h: number) => void,
+  w = 512,
+  h = 256,
+) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const g = c.getContext("2d");
+  if (g) draw(g, w, h);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 // ---------------------------------------------------------------- builder
@@ -335,10 +419,10 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
       seg.rotation.y = -Math.atan2(p.tz, p.tx) + Math.PI / 2;
       add(seg);
       // Spectators as instanced-ish coloured blocks on the top row
-      const crowd = new THREE.InstancedMesh(crowdGeo, crowdMats[i % crowdMats.length], 6);
+      const crowd = new THREE.InstancedMesh(crowdGeo, crowdMats[i % crowdMats.length], 10);
       const m = new THREE.Matrix4();
-      for (let c = 0; c < 6; c++) {
-        m.makeTranslation((c - 2.5) * 2.6, 0, 0);
+      for (let c = 0; c < 10; c++) {
+        m.makeTranslation((c - 4.5) * 2.6, 0, 0);
         crowd.setMatrixAt(c, m);
       }
       crowd.position.set(p.x, h + 0.6, p.z);
@@ -406,41 +490,224 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
   infield.scale.set(TRACK.ax - TRACK.half - 4, TRACK.az - TRACK.half - 4, 1);
   add(infield);
 
-  // ---- Pit lane ----
+  // ---- Pit lane: realistic NASCAR pit road on the inside of the front straight ----
+  const crewGroups: Array<{ figs: THREE.Mesh[]; bases: number[] }> = [];
+  const flags: Array<{ m: THREE.Mesh; phase: number }> = [];
+  let pitT = 0;
   const pitMat = new THREE.MeshToonMaterial({ color: 0x4a4f5a });
-  const pitPos: number[] = [];
-  const PSEG = 60;
-  for (let i = 0; i < PSEG; i++) {
-    const a = PIT.thetaStart - (i / PSEG) * (PIT.thetaStart - PIT.thetaEnd);
-    const b = PIT.thetaStart - ((i + 1) / PSEG) * (PIT.thetaStart - PIT.thetaEnd);
-    const a1 = ovalPoint(a, PIT.latInner);
-    const a2 = ovalPoint(a, PIT.latOuter);
-    const b1 = ovalPoint(b, PIT.latInner);
-    const b2 = ovalPoint(b, PIT.latOuter);
-    pitPos.push(a1.x, 0.03, a1.z, b1.x, 0.03, b1.z, a2.x, 0.03, a2.z);
-    pitPos.push(b1.x, 0.03, b1.z, b2.x, 0.03, b2.z, a2.x, 0.03, a2.z);
-  }
-  const pitGeo = new THREE.BufferGeometry();
-  pitGeo.setAttribute("position", new THREE.Float32BufferAttribute(pitPos, 3));
-  pitGeo.computeVertexNormals();
-  add(new THREE.Mesh(pitGeo, pitMat));
+  const pitSpan = PIT.thetaStart - PIT.thetaEnd;
+  const mergeEdgeIn = -24.5; // garage-side end of the merge wedges at the track edge
+  const mergeEdgeOut = -22.3; // wall-side end of the merge wedges at the track edge
 
-  // Pit wall (between lane and track) + pit boxes, garages, crew, equipment
-  const pitWallMat = new THREE.MeshToonMaterial({ color: 0xeef1f5 });
-  const boxLineMat = new THREE.MeshBasicMaterial({ color: 0xffcf3f });
-  const teamCols = [0xff5a5f, 0x4d7cff, 0x6bcb77, 0xffcf3f, 0xc56bff, 0x00c2d1, 0xff9f45, 0xffffff];
-  for (let i = 0; i < PSEG; i += 2) {
-    const a = PIT.thetaStart - (i / PSEG) * (PIT.thetaStart - PIT.thetaEnd);
-    const p = ovalPoint(a, PIT.latOuter + 1.5);
-    const seg = new THREE.Mesh(new THREE.BoxGeometry(8, 1.3, 0.5), pitWallMat);
-    seg.position.set(p.x, 0.65, p.z);
-    seg.rotation.y = -Math.atan2(p.tz, p.tx) + Math.PI / 2;
-    add(seg);
+  // Core lane + curved pit entry / pit exit merge wedges
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd, PIT.thetaStart, () => PIT.latInner, () => PIT.latOuter, 0.03, 60),
+    pitMat,
+  ));
+  const entryLatA = (u: number) => lerp(PIT.latInner, mergeEdgeIn, u);
+  const entryLatB = (u: number) => lerp(PIT.latOuter, mergeEdgeOut, u);
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaStart, PIT.thetaStart + PIT.mergeZone, entryLatA, entryLatB, 0.03, 24),
+    pitMat,
+  ));
+  const exitLatA = (u: number) => lerp(mergeEdgeIn, PIT.latInner, u);
+  const exitLatB = (u: number) => lerp(mergeEdgeOut, PIT.latOuter, u);
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd - PIT.mergeZone, PIT.thetaEnd, exitLatA, exitLatB, 0.03, 24),
+    pitMat,
+  ));
+
+  // Continuous yellow line on the right (pit wall) side + white line on the left
+  const pitYellow = new THREE.MeshBasicMaterial({ color: 0xffcf3f });
+  const pitWhite = new THREE.MeshBasicMaterial({ color: 0xf4f4f5 });
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd, PIT.thetaStart, () => PIT.latOuter - 0.6, () => PIT.latOuter - 0.15, 0.045, 60),
+    pitYellow,
+  ));
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd, PIT.thetaStart, () => PIT.latInner + 0.15, () => PIT.latInner + 0.6, 0.045, 60),
+    pitWhite,
+  ));
+  // Painted guide lines through both merges
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaStart, PIT.thetaStart + PIT.mergeZone, (u) => entryLatB(u) - 0.7, (u) => entryLatB(u) - 0.25, 0.045, 24),
+    pitWhite,
+  ));
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd - PIT.mergeZone, PIT.thetaEnd, (u) => exitLatB(u) - 0.7, (u) => exitLatB(u) - 0.25, 0.045, 24),
+    pitWhite,
+  ));
+
+  // Rubber wear + oil stains on the pit lane
+  const pitRubber = new THREE.MeshBasicMaterial({ color: 0x14151a, transparent: true, opacity: 0.22 });
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd - 0.3, PIT.thetaStart + 0.3, () => -34.6, () => -33.1, 0.038, 60),
+    pitRubber,
+  ));
+  add(new THREE.Mesh(
+    sectorStrip(PIT.thetaEnd - 0.3, PIT.thetaStart + 0.3, () => -30.9, () => -29.4, 0.038, 60),
+    pitRubber,
+  ));
+  const stainMat = new THREE.MeshBasicMaterial({ color: 0x0c0d10, transparent: true, opacity: 0.2 });
+  for (let i = 0; i < 12; i++) {
+    const stain = new THREE.Mesh(new THREE.CircleGeometry(0.8 + Math.random() * 1.6, 14), stainMat);
+    const sp = ovalPoint(PIT.thetaEnd + Math.random() * pitSpan, -27 - Math.random() * 12);
+    stain.rotation.x = -Math.PI / 2;
+    stain.position.set(sp.x, 0.038, sp.z);
+    add(stain);
   }
+
+  // Continuous concrete pit wall separating the lane from the track
+  const pitWallMat = new THREE.MeshToonMaterial({ color: 0xeef1f5 });
+  const WALL_SEGS = 64;
+  for (let i = 0; i < WALL_SEGS; i++) {
+    const theta = PIT.thetaStart - (i / WALL_SEGS) * pitSpan;
+    const p = ovalPoint(theta, PIT.wallLat);
+    const yaw = Math.atan2(-p.tz, p.tx); // long axis along the lane
+    const seg = new THREE.Mesh(new THREE.BoxGeometry(5.8, 1.1, 0.5), pitWallMat);
+    seg.position.set(p.x, 0.55, p.z);
+    seg.rotation.y = yaw;
+    add(seg);
+    // sponsor panels on the lane side of the wall
+    if (i % 8 === 4) {
+      const panel = new THREE.Mesh(
+        new THREE.PlaneGeometry(3.6, 0.6),
+        new THREE.MeshBasicMaterial({ color: bannerCols[(i / 8 | 0) % bannerCols.length] }),
+      );
+      panel.position.set(p.x - p.nx * 0.28, 0.55, p.z - p.nz * 0.28);
+      panel.rotation.y = Math.atan2(-p.nx, -p.nz);
+      add(panel);
+    }
+  }
+  // Catch fencing above the pit wall (protects the crews like a real speedway)
+  add(new THREE.Mesh(sectorWall(PIT.thetaEnd, PIT.thetaStart, PIT.wallLat, 1.1, 5.1, 60), fenceMat));
+  for (let i = 0; i < WALL_SEGS; i += 4) {
+    const p = ovalPoint(PIT.thetaStart - (i / WALL_SEGS) * pitSpan, PIT.wallLat);
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.16, 4.2, 0.16), postMat);
+    post.position.set(p.x, 3.1, p.z);
+    post.rotation.y = Math.atan2(-p.tx, -p.tz);
+    add(post);
+  }
+
+  // Safety barriers + cones guiding the entry / exit merges
+  const cheekMat = new THREE.MeshToonMaterial({ color: 0xf8f9fa });
+  const coneMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a });
+  const coneBaseMat = new THREE.MeshBasicMaterial({ color: 0x22252e });
+  const placeCone = (theta: number, lat: number) => {
+    const p = ovalPoint(theta, lat);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.68, 8), coneMat);
+    cone.position.set(p.x, 0.37, p.z);
+    add(cone);
+    const base = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.06, 0.52), coneBaseMat);
+    base.position.set(p.x, 0.05, p.z);
+    add(base);
+  };
+  for (let s = 0; s < 4; s++) {
+    const u = 0.2 + s * 0.2;
+    // entry: cheek barriers on the track side + cones on the lane side
+    const tE = PIT.thetaStart + u * PIT.mergeZone;
+    const pE = ovalPoint(tE, entryLatB(u) + 0.35);
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.75, 0.5), cheekMat);
+    bar.position.set(pE.x, 0.38, pE.z);
+    bar.rotation.y = Math.atan2(-pE.tz, pE.tx);
+    add(bar);
+    placeCone(tE, entryLatB(u) - 1.15);
+    // exit: cones marking the merge back onto the track
+    placeCone(PIT.thetaEnd - PIT.mergeZone + u * PIT.mergeZone, exitLatB(u) - 1.15);
+  }
+
+  // Trackside signage: PIT ENTRY / PIT EXIT / speed limit boards
+  const entryTex = signTexture((g, w, h) => {
+    g.fillStyle = "#15803d";
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = "#ffffff";
+    g.lineWidth = 12;
+    g.strokeRect(8, 8, w - 16, h - 16);
+    g.fillStyle = "#ffffff";
+    g.font = "bold 88px Arial, sans-serif";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText("PIT ENTRY", w / 2, h / 2);
+  });
+  const exitTex = signTexture((g, w, h) => {
+    g.fillStyle = "#b91c1c";
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = "#ffffff";
+    g.lineWidth = 12;
+    g.strokeRect(8, 8, w - 16, h - 16);
+    g.fillStyle = "#ffffff";
+    g.font = "bold 88px Arial, sans-serif";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText("PIT EXIT", w / 2, h / 2);
+  });
+  const limitTex = signTexture(
+    (g) => {
+      g.fillStyle = "#ffffff";
+      g.beginPath();
+      g.arc(128, 128, 124, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = "#dc2626";
+      g.lineWidth = 26;
+      g.beginPath();
+      g.arc(128, 128, 104, 0, Math.PI * 2);
+      g.stroke();
+      g.fillStyle = "#111827";
+      g.font = "bold 108px Arial, sans-serif";
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      g.fillText("50", 128, 132);
+    },
+    256,
+    256,
+  );
+  const postSign = (
+    tex: THREE.Texture,
+    w: number,
+    h: number,
+    theta: number,
+    lat: number,
+    y: number,
+  ) => {
+    const p = ovalPoint(theta, lat);
+    const g = new THREE.Group();
+    const panel = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }),
+    );
+    panel.position.y = y;
+    g.add(panel);
+    const postH = y - h / 2 + 0.1;
+    for (const sx of [-1, 1]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, postH, 0.18), postMat);
+      post.position.set(sx * (w / 2 - 0.7), postH / 2, 0);
+      g.add(post);
+    }
+    g.position.set(p.x, 0, p.z);
+    g.rotation.y = Math.atan2(-p.tx, -p.tz); // face the oncoming cars
+    add(g);
+  };
+  postSign(entryTex, 8, 2.4, PIT.thetaStart + 0.68, -23.6, 3.2);
+  postSign(limitTex, 1.9, 1.9, PIT.thetaStart + 0.48, -23.6, 2.5);
+  postSign(limitTex, 1.9, 1.9, PIT.thetaStart + 0.22, -24.2, 2.5);
+  postSign(exitTex, 8, 2.4, PIT.thetaEnd - 0.42, -23.6, 3.2);
+
+  // ---- Pit boxes, garages, crews, equipment ----
+  const boxLineMat = new THREE.MeshBasicMaterial({ color: 0xffcf3f });
+  const teamCols = [0xff5a5f, 0x4d7cff, 0x6bcb77, 0xffcf3f, 0xc56bff, 0x00c2d1];
+  const garageOpeningMat = new THREE.MeshToonMaterial({ color: 0x17181d });
+  const garageRoofMat = new THREE.MeshToonMaterial({ color: 0x2a2d34 });
+  const tyreMat = new THREE.MeshToonMaterial({ color: 0x1c1d22 });
+  const crateMat = new THREE.MeshToonMaterial({ color: 0x8a6d3b });
+  const colliders: Box[] = [];
   for (let i = 0; i < PIT.boxes; i++) {
+    const boxTheta = PIT.thetaStart - ((i + 0.5) / PIT.boxes) * pitSpan;
     const p = pitBoxPoint(i);
+    const yaw = Math.atan2(-p.tx, -p.tz);
     const rot = -Math.atan2(p.tz, p.tx) + Math.PI / 2;
-    // box marking
+    const teamMat = new THREE.MeshToonMaterial({ color: teamCols[i % teamCols.length] });
+
+    // box marking on the lane
     const mark = new THREE.Mesh(new THREE.PlaneGeometry(9, 5.5), boxLineMat);
     mark.rotation.set(-Math.PI / 2, 0, 0);
     mark.rotation.z = rot;
@@ -454,34 +721,203 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
     inner.position.set(p.x, 0.06, p.z);
     add(inner);
 
-    const teamMat = new THREE.MeshToonMaterial({ color: teamCols[i % teamCols.length] });
-    // garage behind the box
-    const gp = ovalPoint(
-      PIT.thetaStart - ((i + 0.5) / PIT.boxes) * (PIT.thetaStart - PIT.thetaEnd),
-      PIT.latInner - 9,
-    );
-    const garage = new THREE.Mesh(new THREE.BoxGeometry(14, 7, 12), teamMat);
-    garage.position.set(gp.x, 3.5, gp.z);
-    garage.rotation.y = rot;
+    // garage building behind the box (opening + team band facing the lane)
+    const gp = ovalPoint(boxTheta, PIT.latInner - 9);
+    const garage = new THREE.Mesh(new THREE.BoxGeometry(12, 6.5, 14), teamMat);
+    garage.position.set(gp.x, 3.25, gp.z);
+    garage.rotation.y = yaw;
     add(garage);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(13, 0.5, 15), garageRoofMat);
+    roof.position.set(gp.x, 6.75, gp.z);
+    roof.rotation.y = yaw;
+    add(roof);
+    const opening = new THREE.Mesh(new THREE.PlaneGeometry(8, 4.6), garageOpeningMat);
+    const op = ovalPoint(boxTheta, PIT.latInner - 9 + 6.06);
+    opening.position.set(op.x, 2.4, op.z);
+    opening.rotation.y = Math.atan2(-op.nx, -op.nz);
+    add(opening);
+    const bandTex = signTexture(
+      (g, w, h) => {
+        g.fillStyle = `#${new THREE.Color(teamCols[i % teamCols.length]).getHexString()}`;
+        g.fillRect(0, 0, w, h);
+        g.fillStyle = "#ffffff";
+        g.font = "bold 72px Arial, sans-serif";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillText(`P${i + 1}`, w / 2, h / 2 + 4);
+        g.font = "bold 34px Arial, sans-serif";
+        g.fillText("ROAD RUSH RACING", w / 2 + 190, h / 2 + 4);
+      },
+      512,
+      96,
+    );
+    const band = new THREE.Mesh(
+      new THREE.PlaneGeometry(9, 1.5),
+      new THREE.MeshBasicMaterial({ map: bandTex }),
+    );
+    band.position.set(op.x, 5.55, op.z);
+    band.rotation.y = opening.rotation.y;
+    add(band);
+    // canopy over the crew walk + support poles
+    const canopy = new THREE.Mesh(new THREE.BoxGeometry(8, 0.35, 14), garageRoofMat);
+    const cp = ovalPoint(boxTheta, PIT.latInner - 4);
+    canopy.position.set(cp.x, 5.3, cp.z);
+    canopy.rotation.y = yaw;
+    add(canopy);
+    for (const side of [-1, 1]) {
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 5.2, 8), postMat);
+      const pp = ovalPoint(boxTheta, PIT.latInner - 0.8);
+      pole.position.set(pp.x + p.tx * side * 6, 2.6, pp.z + p.tz * side * 6);
+      add(pole);
+    }
+    colliders.push({ x: gp.x, z: gp.z, halfX: 7, halfZ: 6.2 });
 
-    // tyre rack, fuel rig, crew figures
-    const rackMat = new THREE.MeshToonMaterial({ color: 0x1c1d22 });
+    // equipment on the crew walk: tyre stacks, fuel rig, tool cart, crates
+    const eq = (lat: number, along: number) => {
+      const q = ovalPoint(boxTheta, lat);
+      return { x: q.x + p.tx * along, z: q.z + p.tz * along };
+    };
     for (let s = 0; s < 4; s++) {
-      const tyre = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.35, 10), rackMat);
-      tyre.position.set(gp.x + (s % 2) * 1.2 - 3, 0.2 + Math.floor(s / 2) * 0.4, gp.z + 4);
-      tyre.rotation.x = Math.PI / 2;
+      const q = eq(-45.5, -4.5 + (s % 2) * 1.3);
+      const tyre = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.36, 10), tyreMat);
+      tyre.position.set(q.x, 0.2 + Math.floor(s / 2) * 0.4, q.z);
       add(tyre);
     }
+    const fr = eq(-45.5, 4.6);
     const rig = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2.2, 1.2), new THREE.MeshToonMaterial({ color: 0xff9f45 }));
-    rig.position.set(gp.x + 4, 1.1, gp.z + 4);
+    rig.position.set(fr.x, 1.1, fr.z);
     add(rig);
-    for (let c = 0; c < 3; c++) {
-      const crew = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.9, 4, 8), teamMat);
-      crew.position.set(p.x - 3 + c * 3, 1, p.z - 4.4);
-      add(crew);
+    const tc = eq(-44.6, 2.3);
+    const cart = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.75, 1.1), new THREE.MeshToonMaterial({ color: 0xdfe4ec }));
+    cart.position.set(tc.x, 0.55, tc.z);
+    cart.rotation.y = yaw;
+    add(cart);
+    for (const side of [-1, 1]) {
+      const cr = eq(-44.2, side * 6.2);
+      const crate = new THREE.Mesh(new THREE.BoxGeometry(1, 0.8, 1), crateMat);
+      crate.position.set(cr.x, 0.4, cr.z);
+      crate.rotation.y = yaw;
+      add(crate);
     }
+
+    // pit crew (animated while servicing this box)
+    const crew = new THREE.Group();
+    crew.position.set(p.x, 0, p.z);
+    crew.rotation.y = yaw;
+    const figs: THREE.Mesh[] = [];
+    const bases: number[] = [];
+    const spots: Array<[number, number]> = [
+      [-1.9, -1.5],
+      [-1.9, 0],
+      [-1.9, 1.5],
+      [-0.7, -2.7],
+    ];
+    for (let c = 0; c < spots.length; c++) {
+      const fig = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.85, 4, 8), teamMat);
+      fig.position.set(spots[c][0], 1, spots[c][1]);
+      const helmet = new THREE.Mesh(
+        new THREE.SphereGeometry(0.24, 8, 8),
+        new THREE.MeshToonMaterial({ color: 0xf8f9fa }),
+      );
+      helmet.position.y = 0.62;
+      fig.add(helmet);
+      crew.add(fig);
+      figs.push(fig);
+      bases.push(1);
+    }
+    add(crew);
+    crewGroups.push({ figs, bases });
   }
+
+  // ---- Timing & scoring tower behind the garages ----
+  const towerTex = signTexture((g, w, h) => {
+    g.fillStyle = "#101623";
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = "#ffcf3f";
+    g.font = "bold 84px Arial, sans-serif";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText("ROAD RUSH", w / 2, 62);
+    g.fillStyle = "#ffffff";
+    g.font = "bold 60px Arial, sans-serif";
+    g.fillText("SPEEDWAY", w / 2, 146);
+    for (let cx = 0; cx < 16; cx++) {
+      for (let cy = 0; cy < 2; cy++) {
+        g.fillStyle = (cx + cy) % 2 ? "#ffffff" : "#101623";
+        g.fillRect(cx * 32, h - 64 + cy * 32, 32, 32);
+      }
+    }
+  }, 512, 256);
+  const towerP = ovalPoint(Math.PI / 2, -64);
+  const towerShell = new THREE.MeshToonMaterial({ color: 0xb9c1cf });
+  const towerCabinMat = new THREE.MeshToonMaterial({ color: 0x39404e });
+  const podium = new THREE.Mesh(new THREE.BoxGeometry(12, 3, 12), new THREE.MeshToonMaterial({ color: 0xcfd6e0 }));
+  podium.position.set(towerP.x, 1.5, towerP.z);
+  add(podium);
+  const shaft = new THREE.Mesh(new THREE.BoxGeometry(5, 30, 5), towerShell);
+  shaft.position.set(towerP.x, 18, towerP.z);
+  add(shaft);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(13, 8, 11), towerCabinMat);
+  cabin.position.set(towerP.x, 37, towerP.z);
+  add(cabin);
+  const spire = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 7, 6), towerShell);
+  spire.position.set(towerP.x, 44.5, towerP.z);
+  add(spire);
+  for (const sz of [-1, 1]) {
+    const screen = new THREE.Mesh(
+      new THREE.PlaneGeometry(11, 5.5),
+      new THREE.MeshBasicMaterial({ map: towerTex }),
+    );
+    screen.position.set(towerP.x, 37, towerP.z + sz * 5.6);
+    screen.rotation.y = sz > 0 ? 0 : Math.PI;
+    add(screen);
+  }
+  colliders.push({ x: towerP.x, z: towerP.z, halfX: 6.5, halfZ: 6.5 });
+
+  // ---- Starter / flag stand above the pit wall at start-finish ----
+  const fs = ovalPoint(Math.PI / 2, PIT.wallLat);
+  const standMat = new THREE.MeshToonMaterial({ color: 0xdfe4ec });
+  const platform = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.35, 3), standMat);
+  platform.position.set(fs.x, 2.35, fs.z);
+  add(platform);
+  for (const sx of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 2.35, 0.22), postMat);
+    leg.position.set(fs.x + sx * 1.8, 1.18, fs.z);
+    add(leg);
+  }
+  const checkerTex = signTexture(
+    (g) => {
+      for (let cx = 0; cx < 8; cx++) {
+        for (let cy = 0; cy < 4; cy++) {
+          g.fillStyle = (cx + cy) % 2 ? "#111827" : "#f8f9fa";
+          g.fillRect(cx * 16, cy * 16, 16, 16);
+        }
+      }
+    },
+    128,
+    64,
+  );
+  const flagCols: Array<{ c?: number; tex?: THREE.Texture }> = [
+    { c: 0x6bcb77 },
+    { c: 0xffcf3f },
+    { tex: checkerTex },
+  ];
+  flagCols.forEach((f, i) => {
+    const fx = fs.x + (i - 1) * 1.5;
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.6, 6), postMat);
+    pole.position.set(fx, 3.8, fs.z);
+    add(pole);
+    const flag = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.05, 0.62),
+      f.tex
+        ? new THREE.MeshBasicMaterial({ map: f.tex, side: THREE.DoubleSide })
+        : new THREE.MeshBasicMaterial({ color: f.c, side: THREE.DoubleSide }),
+    );
+    flag.position.set(fx + 0.55, 4.85, fs.z);
+    add(flag);
+    flags.push({ m: flag, phase: i * 2.1 });
+  });
+  colliders.push({ x: fs.x, z: fs.z, halfX: 2.4, halfZ: 1.8 });
 
   // Pit buildings / team hospitality in the infield
   const buildMat = new THREE.MeshToonMaterial({ color: 0xe6ebf2 });
@@ -497,6 +933,27 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
     add(roof);
   }
 
+  // Pit-scene animation: crew works the active box, flags flutter
+  const updatePitScene = (dt: number, activeBox: number) => {
+    pitT += dt;
+    for (const f of flags) {
+      f.m.rotation.y = Math.sin(pitT * 2.6 + f.phase) * 0.38;
+    }
+    crewGroups.forEach((cg, i) => {
+      const active = i === activeBox;
+      for (let k = 0; k < cg.figs.length; k++) {
+        const fig = cg.figs[k];
+        if (active) {
+          fig.position.y = cg.bases[k] + Math.abs(Math.sin(pitT * 9 + k * 1.9)) * 0.24;
+          fig.rotation.y = Math.sin(pitT * 5.2 + k * 1.3) * 0.55;
+        } else {
+          fig.position.y = cg.bases[k] + Math.sin(pitT * 1.3 + k * 2.2) * 0.035;
+          fig.rotation.y *= 0.96;
+        }
+      }
+    });
+  };
+
   const applyTimeOfDay = (nt: TimeOfDayDef) => {
     roadMat.color.set(nt.road);
     lampMat.color.set(nt.night ? 0xfff3c4 : 0xdfe4ec);
@@ -504,7 +961,7 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
   };
 
   return {
-    buildings: [],
+    buildings: colliders,
     ramps: [],
     sand: [],
     roads: [],
@@ -512,5 +969,6 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
     radius: TRACK_RADIUS,
     stuntZone: { x: 0, z: 0, radius: 0 },
     applyTimeOfDay,
+    updatePitScene,
   };
 }
