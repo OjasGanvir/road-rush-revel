@@ -869,6 +869,15 @@ export class GameEngine {
     if (handbrake) this.vf -= this.vf * Math.min(1, dt * 1.0);
     // Rougher surfaces scrub speed.
     this.vf -= this.vf * Math.min(1, dt * surface.drag);
+    // Grass: heavy 40-50% speed loss when leaving the paved surface.
+    if (!this.isOnRoad(this.px, this.pz) && !this.isOnSand(this.px, this.pz)) {
+      const grassMax = maxFwd * 0.55;
+      if (Math.abs(this.vf) > grassMax) {
+        this.vf += (Math.sign(this.vf) * grassMax - this.vf) * Math.min(1, dt * 7);
+      }
+      // extra continuous scrub on grass
+      this.vf -= this.vf * Math.min(1, dt * 0.7);
+    }
     this.vf = Math.max(-maxRev, Math.min(maxFwd, this.vf));
 
     if (this.fuel < 0.05 && Math.abs(this.vf) > 10.5) {
@@ -1233,16 +1242,15 @@ export class GameEngine {
     if (!this.inPitLane) {
       this.inPitLane = true;
       this.cb.onPopup?.(
-        pit.box >= 0 ? `PIT LANE — LIMITER ON · BOX ${pit.box + 1}` : "PIT LANE — LIMITER ON",
+        pit.box >= 0 ? `PIT LANE · BOX ${pit.box + 1}` : "PIT LANE",
         "stunt",
       );
     }
-    // Automatic pit-lane speed limiter.
-    if (this.vf > PIT.speedLimit) this.vf += (PIT.speedLimit - this.vf) * Math.min(1, dt * 3.5);
-    if (this.vf < -PIT.speedLimit * 0.5) this.vf = -PIT.speedLimit * 0.5;
 
-    // Stopped alongside a box -> the crew services the car automatically.
-    if (pit.box >= 0 && !this.pitDone && Math.abs(this.vf) < 4) {
+    // Stopped alongside OWN pit box -> the crew services the car automatically.
+    // Player's assigned pit is box 0 — other boxes are for rival teams.
+    const PLAYER_PIT_BOX = 0;
+    if (pit.box === PLAYER_PIT_BOX && !this.pitDone && Math.abs(this.vf) < 4) {
       const box = pitBoxPoint(pit.box);
       this.px = box.x;
       this.pz = box.z;
@@ -1274,21 +1282,39 @@ export class GameEngine {
         this.cb.onEvent?.("bump");
       }
     }
-    // Concrete pit wall: keeps cars in the pit lane through the pit sector
-    // (mirrors the outer barrier on the inside of the front straight).
-    if (
-      inPitCore(near.theta) &&
-      near.lat > PIT.wallLat - 1 &&
-      near.lat < -TRACK.half - 0.05
-    ) {
-      const push = PIT.wallLat - 1 - near.lat;
-      this.px += near.nx * push;
-      this.pz += near.nz * push;
-      this.slideAlongNormal(near.nx, near.nz, 0.99);
-      if (this.wallCool <= 0) {
-        this.wallCool = 0.6;
-        this.shake = Math.min(0.15, this.shake + 0.05);
-        this.cb.onEvent?.("bump");
+    // Concrete pit wall: solid barrier in the core pit sector — blocks
+    // passage between track and pit lane except at the entry/exit merges.
+    // Uses directional check so you can slide away from the wall without getting stuck.
+    if (inPitCore(near.theta) && Math.abs(near.lat - PIT.wallLat) < 1.35) {
+      const onTrackSide = near.lat > PIT.wallLat;
+      const { x: fwx, z: fwz } = forwardFromHeading(this.heading);
+      const rx = Math.cos(this.heading);
+      const rz = -Math.sin(this.heading);
+      let wx = fwx * this.vf + rx * this.vl;
+      let wz = fwz * this.vf + rz * this.vl;
+      const dot = wx * near.nx + wz * near.nz; // >0 = outward (pit->track)
+      const movingIntoWall =
+        (onTrackSide && dot < -0.3) || (!onTrackSide && dot > 0.3);
+      const deepInside = Math.abs(near.lat - PIT.wallLat) < 0.65;
+      if (movingIntoWall || deepInside) {
+        const targetLat = onTrackSide ? PIT.wallLat + 1.4 : PIT.wallLat - 1.4;
+        const push = targetLat - near.lat;
+        this.px += near.nx * push;
+        this.pz += near.nz * push;
+        // Keep only tangential velocity so you slide along the wall instead of sticking.
+        if (movingIntoWall) {
+          wx -= near.nx * dot;
+          wz -= near.nz * dot;
+          wx *= 0.995;
+          wz *= 0.995;
+          this.vf = wx * fwx + wz * fwz;
+          this.vl = wx * rx + wz * rz;
+        }
+        if (this.wallCool <= 0) {
+          this.wallCool = 0.5;
+          this.shake = Math.min(0.2, this.shake + 0.08);
+          this.cb.onEvent?.("bump");
+        }
       }
     }
     if (this.wallCool > 0) this.wallCool -= dt;
@@ -1344,8 +1370,8 @@ export class GameEngine {
     if (this.isOnRoad(x, z)) {
       return wet ? { grip: 0.78, drag: 0.02 } : { grip: 1, drag: 0.02 }; // asphalt
     }
-    // grass / dirt off-road — medium-low grip, more drag
-    return { grip: 0.72, drag: 0.28 };
+    // grass / dirt off-road — heavy speed loss (40-50% as requested)
+    return { grip: 0.55, drag: 0.95 };
   }
 
   /** Per-class visual dynamics: how much the body leans and how soft the ride. */

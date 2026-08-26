@@ -494,6 +494,7 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
   const crewGroups: Array<{ figs: THREE.Mesh[]; bases: number[] }> = [];
   const flags: Array<{ m: THREE.Mesh; phase: number }> = [];
   let pitT = 0;
+  const colliders: Box[] = [];
   const pitMat = new THREE.MeshToonMaterial({ color: 0x4a4f5a });
   const pitSpan = PIT.thetaStart - PIT.thetaEnd;
   const mergeEdgeIn = -24.5; // garage-side end of the merge wedges at the track edge
@@ -568,6 +569,16 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
     seg.position.set(p.x, 0.55, p.z);
     seg.rotation.y = yaw;
     add(seg);
+    // Solid collision for the wall — axis-aligned boxes overlapping the visual
+    // segments so there are no gaps even at high speed (every segment, extra
+    // length to bridge the gaps between visual wall pieces).
+    {
+      const halfAlong = 4.2;
+      const halfAcross = 1.1;
+      const ax = Math.abs(p.tx) * halfAlong + Math.abs(p.nx) * halfAcross;
+      const az = Math.abs(p.tz) * halfAlong + Math.abs(p.nz) * halfAcross;
+      colliders.push({ x: p.x, z: p.z, halfX: Math.max(1.8, ax), halfZ: Math.max(1.8, az) });
+    }
     // sponsor panels on the lane side of the wall
     if (i % 8 === 4) {
       const panel = new THREE.Mesh(
@@ -699,7 +710,6 @@ export function buildTrack(scene: THREE.Scene, t: TimeOfDayDef): WorldRefs {
   const garageRoofMat = new THREE.MeshToonMaterial({ color: 0x2a2d34 });
   const tyreMat = new THREE.MeshToonMaterial({ color: 0x1c1d22 });
   const crateMat = new THREE.MeshToonMaterial({ color: 0x8a6d3b });
-  const colliders: Box[] = [];
   for (let i = 0; i < PIT.boxes; i++) {
     const boxTheta = PIT.thetaStart - ((i + 0.5) / PIT.boxes) * pitSpan;
     const p = pitBoxPoint(i);
