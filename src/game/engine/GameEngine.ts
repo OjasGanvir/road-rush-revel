@@ -78,10 +78,11 @@ export type Stats = {
 };
 
 export type ControlAction = "left" | "right" | "accel" | "reverse" | "handbrake" | "nitro";
-export type PopupKind = "coin" | "drift" | "stunt";
+export type PopupKind = "coin" | "drift" | "stunt" | "camera";
 
 export type EngineCallbacks = {
   onStats?: (s: Stats) => void;
+  onPose?: (x: number, z: number, heading: number) => void;
   onPopup?: (text: string, kind: PopupKind) => void;
   onBankCoins?: (amount: number) => void;
   onDriftBanked?: (score: number) => void;
@@ -725,9 +726,10 @@ export class GameEngine {
     this.updateCamera(dt);
     this.updateAudio();
     this.updateWear(sdt);
+    this.cb.onPose?.(this.px, this.pz, this.heading);
 
     this.statsTimer += dt;
-    if (this.statsTimer >= 0.08) {
+    if (this.statsTimer >= 0.04) {
       this.statsTimer = 0;
       this.cb.onStats?.({
         speed: Math.round(Math.abs(this.vf) * KMH),
@@ -869,8 +871,8 @@ export class GameEngine {
     if (handbrake) this.vf -= this.vf * Math.min(1, dt * 1.0);
     // Rougher surfaces scrub speed.
     this.vf -= this.vf * Math.min(1, dt * surface.drag);
-    // Grass: heavy 40-50% speed loss when leaving the paved surface.
-    if (!this.isOnRoad(this.px, this.pz) && !this.isOnSand(this.px, this.pz)) {
+    // Grass: heavy 40-50% speed loss when leaving the paved surface on NASCAR track mode only.
+    if (this.isTrackMode && !this.isOnRoad(this.px, this.pz) && !this.isOnSand(this.px, this.pz)) {
       const grassMax = maxFwd * 0.55;
       if (Math.abs(this.vf) > grassMax) {
         this.vf += (Math.sign(this.vf) * grassMax - this.vf) * Math.min(1, dt * 7);
@@ -1370,7 +1372,11 @@ export class GameEngine {
     if (this.isOnRoad(x, z)) {
       return wet ? { grip: 0.78, drag: 0.02 } : { grip: 1, drag: 0.02 }; // asphalt
     }
-    // grass / dirt off-road — heavy speed loss (40-50% as requested)
+    // In open world (city mode), grass has same speed / drag / grip as road!
+    if (!this.isTrackMode) {
+      return wet ? { grip: 0.78, drag: 0.02 } : { grip: 1, drag: 0.02 };
+    }
+    // On NASCAR track mode: grass / dirt off-road causes heavy speed loss (40-50% as requested)
     return { grip: 0.55, drag: 0.95 };
   }
 

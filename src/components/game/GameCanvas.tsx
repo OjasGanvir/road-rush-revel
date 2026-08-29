@@ -18,6 +18,7 @@ import {
   Camera,
   Flame,
   X,
+  Maximize2,
 } from "lucide-react";
 import {
   GameEngine,
@@ -80,6 +81,7 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
   const [tod, setTod] = useState<TimeOfDayId>("sunny");
   const [mapOpen, setMapOpen] = useState(false);
   const [destination, setDestination] = useState<MapPoint | null>(null);
+  const poseRef = useRef<{ x: number; z: number; heading: number }>({ x: 0, z: 0, heading: 0 });
 
   const route = useMemo(
     () => (destination ? buildRoute(mode, { x: stats.x, z: stats.z }, destination) : null),
@@ -110,6 +112,9 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
 
     const engine = new GameEngine(container, config, {
       onStats: setStats,
+      onPose: (x, z, heading) => {
+        poseRef.current = { x, z, heading };
+      },
       onBankCoins: (amount) => profileStore.addCoins(amount),
       onDriftBanked: (score) => profileStore.recordDrift(score),
       onPopup: (text, kind) => {
@@ -141,15 +146,33 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
     };
   }, [mode]);
 
+  const cycleCamera = useCallback(() => {
+    const idx = CAMERA_MODES.findIndex((m) => m.id === camMode);
+    const nextDef = CAMERA_MODES[(idx + 1) % CAMERA_MODES.length];
+    const next = nextDef.id;
+    setCamMode(next);
+    engineRef.current?.setCameraMode(next);
+    profileStore.setCameraMode(next);
+
+    const id = popupId++;
+    setPopups((p) => [...p.slice(-4), { id, text: `Camera: ${nextDef.name}`, kind: "camera" }]);
+    setTimeout(() => setPopups((p) => p.filter((x) => x.id !== id)), 900);
+  }, [camMode]);
+
   useEffect(() => {
-    const onMapKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== "m") return;
-      e.preventDefault();
-      setMapOpen((open) => !open);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "c" || e.key === "C") {
+        e.preventDefault();
+        cycleCamera();
+      } else if (e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        setMapOpen((open) => !open);
+      }
     };
-    window.addEventListener("keydown", onMapKey);
-    return () => window.removeEventListener("keydown", onMapKey);
-  }, []);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cycleCamera]);
 
   useEffect(() => {
     engineRef.current?.setRoute(route?.points ?? null);
@@ -186,14 +209,6 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
     setMuted(next);
     engineRef.current?.setMuted(next);
     profileStore.setMuted(next);
-  };
-
-  const cycleCamera = () => {
-    const idx = CAMERA_MODES.findIndex((m) => m.id === camMode);
-    const next = CAMERA_MODES[(idx + 1) % CAMERA_MODES.length].id;
-    setCamMode(next);
-    engineRef.current?.setCameraMode(next);
-    profileStore.setCameraMode(next);
   };
 
   const changeCamMode = (mode: CameraModeId) => {
@@ -254,8 +269,6 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
         }}
       />
 
-
-
       {/* On-screen driving controls */}
       {status === "playing" && (
         <div className="pointer-events-none absolute inset-0 z-10">
@@ -305,7 +318,7 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
       )}
 
       {/* Top-left HUD */}
-      <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col items-start gap-1.5">
+      <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col items-start gap-2">
         {status === "playing" && (
           <MiniMap
             mode={mode}
@@ -314,16 +327,36 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
             heading={stats.heading}
             route={route}
             onOpen={() => setMapOpen(true)}
+            poseRef={poseRef}
           />
         )}
-        <HudPill icon={<Coins className="h-4 w-4" />} value={stats.coins} tone="coin" />
-        {stats.driftScore > 0 && (
-          <div className="flex items-center gap-2 rounded-full bg-[#ff5a5f] px-3 py-1 text-sm font-extrabold text-white shadow">
-            <Flame className="h-4 w-4" />
-            <span className="tabular-nums">{stats.driftScore}</span>
-            <span className="rounded-full bg-white/25 px-1.5 text-xs">x{stats.driftMult}</span>
-          </div>
+
+        {/* Active Destination Deselect Button */}
+        {destination && (
+          <button
+            type="button"
+            onClick={() => setDestination(null)}
+            className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-rose-600/95 hover:bg-rose-500 text-white px-3.5 py-1.5 text-xs font-black shadow-xl backdrop-blur-md transition-all active:scale-95 animate-in fade-in slide-in-from-top-2 border border-white/25 cursor-pointer"
+            title="Deselect chosen destination"
+          >
+            <X className="h-4 w-4 stroke-[3]" />
+            <span>Clear Destination</span>
+            <span className="rounded-full bg-black/35 px-1.5 py-0.5 text-[10px] font-bold">
+              {Math.round(Math.hypot(stats.x - destination.x, stats.z - destination.z))}m
+            </span>
+          </button>
         )}
+
+        <div className="flex items-center gap-1.5">
+          <HudPill icon={<Coins className="h-4 w-4" />} value={stats.coins} tone="coin" />
+          {stats.driftScore > 0 && (
+            <div className="flex items-center gap-1.5 rounded-full bg-[#ff5a5f] px-3 py-1 text-sm font-extrabold text-white shadow">
+              <Flame className="h-4 w-4" />
+              <span className="tabular-nums">{stats.driftScore}</span>
+              <span className="rounded-full bg-white/25 px-1.5 text-xs">x{stats.driftMult}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Fuel & tire status panel */}
@@ -334,13 +367,15 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
         {status === "playing" && <SpeedReadout speed={stats.speed} />}
         <button
           onClick={cycleCamera}
-          aria-label="Switch camera view"
+          aria-label="Switch camera view (Key: C)"
+          title="Switch camera view (Key: C)"
           className="flex h-11 items-center gap-1.5 rounded-full bg-background/80 px-3 text-foreground shadow-lg backdrop-blur transition-transform active:scale-90"
         >
           <Camera className="h-5 w-5" />
           <span className="text-xs font-bold">
             {CAMERA_MODES.find((m) => m.id === camMode)?.name ?? "Cam"}
           </span>
+          <span className="rounded bg-muted px-1 text-[10px] font-bold text-muted-foreground">C</span>
         </button>
         <IconBtn label={muted ? "Unmute" : "Mute"} onClick={toggleMute}>
           {muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
@@ -366,7 +401,14 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
             key={p.id}
             className="absolute animate-[fade-out_0.9s_ease-out_forwards] text-2xl font-extrabold drop-shadow-lg"
             style={{
-              color: p.kind === "coin" ? "#ffcf3f" : p.kind === "drift" ? "#ff5a5f" : "#4d7cff",
+              color:
+                p.kind === "coin"
+                  ? "#ffcf3f"
+                  : p.kind === "drift"
+                    ? "#ff5a5f"
+                    : p.kind === "camera"
+                      ? "#63edff"
+                      : "#4d7cff",
               transform: `translateY(${-40 - i * 30}px)`,
             }}
           >
@@ -455,7 +497,6 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
             </div>
           </div>
 
-
           <div className="flex w-full flex-col gap-3">
             <Button size="lg" className="w-full" onClick={handleResume}>
               <Play className="mr-1 h-5 w-5" /> Resume
@@ -485,13 +526,13 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
           heading={stats.heading}
           route={route}
           onSelect={selectDestination}
+          onClearDestination={() => setDestination(null)}
           onClose={() => setMapOpen(false)}
         />
       )}
     </div>
   );
 }
-
 
 function SpeedReadout({ speed }: { speed: number }) {
   return (
@@ -509,6 +550,7 @@ function MiniMap({
   heading,
   route,
   onOpen,
+  poseRef,
 }: {
   mode: "city" | "track";
   x: number;
@@ -516,43 +558,139 @@ function MiniMap({
   heading: number;
   route: Route | null;
   onOpen: () => void;
+  poseRef?: React.RefObject<{ x: number; z: number; heading: number }>;
 }) {
-  const size = 136;
-  const pad = 10;
-  const worldSize = mode === "track" ? 760 : WORLD_RADIUS * 2;
-  const scale = (size - pad * 2) / worldSize;
-  const centre = size / 2;
+  const size = 200;
+  // Center is (100, 100)
+  const arrowX = 100;
+  // 15% down from center: 100 + 200 * 0.15 = 130
+  const arrowY = 130;
+  // Scale for driving navigation view
+  const scale = mode === "track" ? 0.38 : 0.44;
+
+  const mapGroupRef = useRef<SVGGElement>(null);
+  const currentPoseRef = useRef({ x, z, heading });
+  const targetPoseRef = useRef({ x, z, heading });
+
+  useEffect(() => {
+    targetPoseRef.current = { x, z, heading };
+  }, [x, z, heading]);
+
+  useEffect(() => {
+    let animId: number;
+    let lastTime = performance.now();
+
+    const animate = (time: number) => {
+      const dt = Math.min((time - lastTime) / 1000, 0.1);
+      lastTime = time;
+
+      if (poseRef?.current) {
+        targetPoseRef.current = poseRef.current;
+      }
+
+      const target = targetPoseRef.current;
+      const current = currentPoseRef.current;
+
+      // Shortest angle difference in radians
+      let dHeading = target.heading - current.heading;
+      dHeading = Math.atan2(Math.sin(dHeading), Math.cos(dHeading));
+
+      // Snappy and critically damped smoothing (30/s)
+      const blend = 1 - Math.exp(-32 * dt);
+      current.heading += dHeading * blend;
+      current.x += (target.x - current.x) * blend;
+      current.z += (target.z - current.z) * blend;
+
+      const rot = (current.heading * 180) / Math.PI;
+
+      if (mapGroupRef.current) {
+        mapGroupRef.current.setAttribute(
+          "transform",
+          `translate(${arrowX}, ${arrowY}) rotate(${rot.toFixed(3)}) translate(${(-current.x * scale).toFixed(3)}, ${(-current.z * scale).toFixed(3)})`
+        );
+      }
+
+      animId = requestAnimationFrame(animate);
+    };
+
+    animId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animId);
+  }, [scale, arrowX, arrowY, poseRef]);
+
   const toMap = (wx: number, wz: number) => ({
-    x: centre + wx * scale,
-    y: centre + wz * scale,
+    x: wx * scale,
+    y: wz * scale,
   });
-  const car = toMap(x, z);
-  const rot = (heading * 180) / Math.PI;
+
+  const initialRot = (heading * 180) / Math.PI;
 
   return (
     <button
       type="button"
-      aria-label="Open map"
       onClick={onOpen}
-      className="pointer-events-auto h-[116px] w-[116px] overflow-hidden rounded-2xl border border-white/20 bg-black/60 text-left shadow-lg backdrop-blur-md sm:h-[136px] sm:w-[136px]"
+      title="Click to open map (M)"
+      aria-label="Open full map"
+      className="group relative pointer-events-auto w-[35vh] h-[35vh] aspect-square overflow-hidden rounded-full border-2 border-white/40 bg-[#07131c]/80 shadow-2xl backdrop-blur-md cursor-pointer transition-transform hover:scale-[1.03] active:scale-95 text-left p-0 block focus:outline-none"
     >
-      <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full">
+      <svg
+        viewBox={`0 0 ${size} ${size}`}
+        className="h-full w-full select-none pointer-events-none"
+      >
         <defs>
           <radialGradient id="minimap-ground" cx="50%" cy="50%" r="60%">
             <stop offset="0%" stopColor="#7acb70" />
             <stop offset="100%" stopColor="#4ea35f" />
           </radialGradient>
+          <clipPath id="minimap-circle-clip">
+            <circle cx="100" cy="100" r="99" />
+          </clipPath>
         </defs>
-        <rect width={size} height={size} fill="#4aa8d8" />
-        {mode === "track" ? (
-          <TrackMap scale={scale} toMap={toMap} route={route} />
-        ) : (
-          <CityMap scale={scale} toMap={toMap} route={route} />
-        )}
-        <g transform={`translate(${car.x} ${car.y}) rotate(${rot})`}>
-          <path d="M 0 -7 L 5 6 L 0 3 L -5 6 Z" fill="#ff5a5f" stroke="white" strokeWidth="1.4" />
+
+        <g clipPath="url(#minimap-circle-clip)">
+          {/* Ocean/surroundings background */}
+          <rect width={size} height={size} fill="#4aa8d8" />
+
+          {/* Dynamic moving & rotating world map (animated directly via mapGroupRef at 60fps) */}
+          <g
+            ref={mapGroupRef}
+            transform={`translate(${arrowX}, ${arrowY}) rotate(${initialRot.toFixed(3)}) translate(${(-x * scale).toFixed(3)}, ${(-z * scale).toFixed(3)})`}
+          >
+            {mode === "track" ? (
+              <TrackMap scale={scale} toMap={toMap} route={route} />
+            ) : (
+              <CityMap scale={scale} toMap={toMap} route={route} />
+            )}
+          </g>
+
+          {/* Radar range ring */}
+          <circle cx="100" cy="100" r="65" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="3 3" />
+
+          {/* Fixed Arrow: 15% down from center (100, 130), facing forward (straight UP) */}
+          <g transform={`translate(${arrowX} ${arrowY})`}>
+            {/* Subtle pulse / glow halo */}
+            <circle cx="0" cy="0" r="11" fill="#ff5a5f" opacity="0.25" />
+            {/* Forward pointing navigation arrow */}
+            <path
+              d="M 0 -11 L 8 9 L 0 4.5 L -8 9 Z"
+              fill="#ff5a5f"
+              stroke="#ffffff"
+              strokeWidth="2"
+              strokeLinejoin="round"
+            />
+          </g>
         </g>
+
+        {/* Circular inner bezel / compass border */}
+        <circle cx="100" cy="100" r="98.5" fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="2" />
       </svg>
+
+      {/* GPS Active indicator if route exists */}
+      {route && (
+        <div className="pointer-events-none absolute left-1/2 top-2.5 -translate-x-1/2 flex items-center gap-1 rounded-full bg-cyan-400 px-2.5 py-0.5 text-[9px] font-black text-black shadow-md backdrop-blur">
+          <span className="h-1.5 w-1.5 rounded-full bg-black animate-pulse" />
+          <span>GPS ACTIVE</span>
+        </div>
+      )}
     </button>
   );
 }
@@ -617,10 +755,11 @@ function TrackMap({
   const inner = ovalPolyline(-TRACK.half, toMap);
   const pitOuter = pitPolyline(PIT.latOuter, toMap);
   const pitInner = pitPolyline(PIT.latInner, toMap);
+  const centre = toMap(0, 0);
 
   return (
     <>
-      <circle cx="68" cy="68" r={340 * scale} fill="url(#minimap-ground)" />
+      <circle cx={centre.x} cy={centre.y} r={380 * scale} fill="url(#minimap-ground)" />
       <polygon points={`${outer} ${inner.split(" ").reverse().join(" ")}`} fill="#4b4f58" />
       <polyline points={pitOuter} fill="none" stroke="#3b404a" strokeWidth={(PIT.latOuter - PIT.latInner) * scale} strokeLinecap="round" />
       <polyline points={pitInner} fill="none" stroke="#ffcf3f" strokeWidth="1.2" />
@@ -642,10 +781,11 @@ function RouteOverlay({
   const destination = toMap(route.destination.x, route.destination.z);
   return (
     <>
-      <polyline points={points} fill="none" stroke="#00bfff" strokeOpacity="0.38" strokeWidth="7" strokeLinecap="round" strokeLinejoin="round" />
-      <polyline points={points} fill="none" stroke="#63edff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx={destination.x} cy={destination.y} r="4.5" fill="#63edff" stroke="#06131d" strokeWidth="1.5" />
-      <circle cx={destination.x} cy={destination.y} r="8" fill="none" stroke="#63edff" strokeOpacity="0.72" strokeWidth="1.5" />
+      <polyline points={points} fill="none" stroke="#00bfff" strokeOpacity="0.38" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round" />
+      <polyline points={points} fill="none" stroke="#63edff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={destination.x} cy={destination.y} r="12" fill="none" stroke="#63edff" strokeOpacity="0.85" strokeWidth="2.5" />
+      <circle cx={destination.x} cy={destination.y} r="6" fill="#ff5a5f" stroke="#ffffff" strokeWidth="2" />
+      <circle cx={destination.x} cy={destination.y} r="2" fill="#ffffff" />
     </>
   );
 }
@@ -683,6 +823,7 @@ function FullMapOverlay({
   heading,
   route,
   onSelect,
+  onClearDestination,
   onClose,
 }: {
   mode: "city" | "track";
@@ -691,6 +832,7 @@ function FullMapOverlay({
   heading: number;
   route: Route | null;
   onSelect: (point: MapPoint) => void;
+  onClearDestination?: () => void;
   onClose: () => void;
 }) {
   const size = 1000;
@@ -705,6 +847,7 @@ function FullMapOverlay({
   const rot = (heading * 180) / Math.PI;
 
   const handleMapClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    e.stopPropagation();
     const ctm = e.currentTarget.getScreenCTM();
     if (!ctm) return;
     const point = e.currentTarget.createSVGPoint();
@@ -716,10 +859,28 @@ function FullMapOverlay({
 
   return (
     <div className="fixed inset-0 z-[60] bg-[#07131c]/95 p-3 backdrop-blur-sm" onClick={onClose}>
-      <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/15 bg-[#102a35] shadow-2xl">
+      <div
+        className="relative h-full w-full overflow-hidden rounded-2xl border border-white/15 bg-[#102a35] shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="pointer-events-none absolute inset-x-5 top-4 z-10 flex items-center justify-between">
-          <div className="rounded-full bg-black/45 px-4 py-2 text-sm font-extrabold uppercase tracking-[0.2em] text-white/90 backdrop-blur">
-            {mode === "track" ? "Speedway map" : "City map"}
+          <div className="flex items-center gap-2">
+            <div className="rounded-full bg-black/45 px-4 py-2 text-sm font-extrabold uppercase tracking-[0.2em] text-white/90 backdrop-blur">
+              {mode === "track" ? "Speedway map" : "City map"}
+            </div>
+            {route && onClearDestination && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClearDestination();
+                }}
+                className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-rose-600/90 hover:bg-rose-500 text-white px-3.5 py-2 text-xs font-black shadow-lg backdrop-blur transition-transform active:scale-95"
+              >
+                <X className="h-3.5 w-3.5 stroke-[3]" />
+                <span>Clear Destination</span>
+              </button>
+            )}
           </div>
           <button
             type="button"
@@ -733,14 +894,19 @@ function FullMapOverlay({
             <X className="h-5 w-5" />
           </button>
         </div>
+
+        {/* Click hint banner */}
+        <div className="pointer-events-none absolute inset-x-0 top-18 z-10 flex justify-center">
+          <span className="rounded-full bg-black/50 px-3 py-1 text-xs font-semibold text-white/90 shadow backdrop-blur">
+            Click anywhere on the map to set a GPS destination
+          </span>
+        </div>
+
         <div className="absolute inset-x-3 bottom-3 top-16 overflow-hidden rounded-xl border border-white/10 bg-[#4aa8d8]">
           <svg
             viewBox={`0 0 ${size} ${size}`}
-            className="h-full w-full cursor-crosshair"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleMapClick(e);
-            }}
+            className="h-full w-full cursor-crosshair select-none pointer-events-auto"
+            onClick={handleMapClick}
           >
             <defs>
               <radialGradient id="full-map-ground" cx="50%" cy="50%" r="60%">
