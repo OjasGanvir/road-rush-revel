@@ -39,7 +39,7 @@ import { profileStore } from "../../game/state/persistence";
 import { ROADS, RING_HALF, RING_RADIUS, STUNT, WORLD_RADIUS, roadExtent } from "../../game/engine/world";
 import { nearestOval, PIT, TRACK, ovalPoint } from "../../game/engine/track";
 import { Button } from "../ui/button";
-import { StatusPanel } from "./StatusPanel";
+import { Speedometer } from "./Speedometer";
 
 type Status = "playing" | "paused";
 type Popup = { id: number; text: string; kind: PopupKind };
@@ -56,6 +56,8 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
   const [status, setStatus] = useState<Status>("playing");
   const [stats, setStats] = useState<Stats>({
     speed: 0,
+    gear: 1,
+    rpm: 1,
     x: 0,
     z: 0,
     heading: 0,
@@ -162,12 +164,24 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.key === "c" || e.key === "C") {
+      const key = e.key.toLowerCase();
+      if (key === "c") {
         e.preventDefault();
         cycleCamera();
-      } else if (e.key.toLowerCase() === "m") {
+      } else if (key === "m") {
         e.preventDefault();
         setMapOpen((open) => !open);
+      } else if (key === "p" || e.key === "Escape") {
+        e.preventDefault();
+        setStatus((s) => {
+          if (s === "playing") {
+            engineRef.current?.pause();
+            return "paused";
+          } else {
+            engineRef.current?.resume();
+            return "playing";
+          }
+        });
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -317,8 +331,32 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
         </div>
       )}
 
-      {/* Top-left HUD */}
+      {/* Top-left HUD: Menu button, MiniMap with Yellow Ochre Fuel Tank Border & Counters */}
       <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col items-start gap-2">
+        {/* Top-left Menu button & Counters row */}
+        <div className="flex items-center gap-2">
+          {status === "playing" && (
+            <button
+              type="button"
+              onClick={handlePause}
+              aria-label="Pause Menu (ESC)"
+              title="Pause Menu"
+              className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 shadow-lg backdrop-blur-md transition-transform active:scale-90 border border-white/20 cursor-pointer"
+            >
+              <Pause className="h-4 w-4" />
+            </button>
+          )}
+          <HudPill icon={<Coins className="h-4 w-4" />} value={stats.coins} tone="coin" />
+          {stats.driftScore > 0 && (
+            <div className="flex items-center gap-1.5 rounded-full bg-[#ff5a5f] px-3 py-1 text-sm font-extrabold text-white shadow">
+              <Flame className="h-4 w-4" />
+              <span className="tabular-nums">{stats.driftScore}</span>
+              <span className="rounded-full bg-white/25 px-1.5 text-xs">x{stats.driftMult}</span>
+            </div>
+          )}
+        </div>
+
+        {/* MiniMap with Yellow Ochre outer Fuel border */}
         {status === "playing" && (
           <MiniMap
             mode={mode}
@@ -326,6 +364,7 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
             z={stats.z}
             heading={stats.heading}
             route={route}
+            fuel={stats.fuel}
             onOpen={() => setMapOpen(true)}
             poseRef={poseRef}
           />
@@ -346,44 +385,28 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
             </span>
           </button>
         )}
-
-        <div className="flex items-center gap-1.5">
-          <HudPill icon={<Coins className="h-4 w-4" />} value={stats.coins} tone="coin" />
-          {stats.driftScore > 0 && (
-            <div className="flex items-center gap-1.5 rounded-full bg-[#ff5a5f] px-3 py-1 text-sm font-extrabold text-white shadow">
-              <Flame className="h-4 w-4" />
-              <span className="tabular-nums">{stats.driftScore}</span>
-              <span className="rounded-full bg-white/25 px-1.5 text-xs">x{stats.driftMult}</span>
-            </div>
-          )}
-        </div>
       </div>
 
-      {/* Fuel & tire status panel */}
-      <StatusPanel fuel={stats.fuel} tyres={stats.tyres} />
-
-      {/* Top-right speed and controls */}
-      <div className="absolute right-3 top-3 z-30 flex items-start gap-2">
-        {status === "playing" && <SpeedReadout speed={stats.speed} />}
+      {/* Top-right: Camera Photo button & Speedometer Cluster */}
+      <div className="absolute right-3 top-3 z-30 flex flex-col items-end gap-2">
         <button
           onClick={cycleCamera}
           aria-label="Switch camera view (Key: C)"
           title="Switch camera view (Key: C)"
-          className="flex h-11 items-center gap-1.5 rounded-full bg-background/80 px-3 text-foreground shadow-lg backdrop-blur transition-transform active:scale-90"
+          className="flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 shadow-lg backdrop-blur-md transition-transform active:scale-90 border border-white/20 cursor-pointer"
         >
           <Camera className="h-5 w-5" />
-          <span className="text-xs font-bold">
-            {CAMERA_MODES.find((m) => m.id === camMode)?.name ?? "Cam"}
-          </span>
-          <span className="rounded bg-muted px-1 text-[10px] font-bold text-muted-foreground">C</span>
         </button>
-        <IconBtn label={muted ? "Unmute" : "Mute"} onClick={toggleMute}>
-          {muted ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
-        </IconBtn>
+
+        {/* Speedometer Tachometer Cluster */}
         {status === "playing" && (
-          <IconBtn label="Pause" onClick={handlePause}>
-            <Pause className="h-5 w-5" />
-          </IconBtn>
+          <Speedometer
+            speed={stats.speed}
+            gear={stats.gear}
+            rpm={stats.rpm}
+            nitro={stats.nitro}
+            tyres={stats.tyres}
+          />
         )}
       </div>
 
@@ -534,21 +557,13 @@ export function GameCanvas({ mode = "city" }: { mode?: "city" | "track" }) {
   );
 }
 
-function SpeedReadout({ speed }: { speed: number }) {
-  return (
-    <div className="pointer-events-none flex h-11 min-w-[86px] flex-col items-center justify-center rounded-full bg-background/80 px-4 shadow-lg backdrop-blur">
-      <span className="text-xl font-extrabold leading-none tabular-nums">{speed}</span>
-      <span className="text-[9px] font-bold uppercase leading-none tracking-widest text-muted-foreground">km/h</span>
-    </div>
-  );
-}
-
 function MiniMap({
   mode,
   x,
   z,
   heading,
   route,
+  fuel = 1,
   onOpen,
   poseRef,
 }: {
@@ -557,16 +572,17 @@ function MiniMap({
   z: number;
   heading: number;
   route: Route | null;
+  fuel?: number;
   onOpen: () => void;
   poseRef?: React.RefObject<{ x: number; z: number; heading: number }>;
 }) {
-  const size = 200;
-  // Center is (100, 100)
-  const arrowX = 100;
-  // 15% down from center: 100 + 200 * 0.15 = 130
-  const arrowY = 130;
+  const size = 240;
+  // Center is (120, 120)
+  const arrowX = 120;
+  // 15% down from center: 120 + 240 * 0.15 = 156
+  const arrowY = 156;
   // Scale for driving navigation view
-  const scale = mode === "track" ? 0.38 : 0.44;
+  const scale = mode === "track" ? 0.36 : 0.42;
 
   const mapGroupRef = useRef<SVGGElement>(null);
   const currentPoseRef = useRef({ x, z, heading });
@@ -624,33 +640,44 @@ function MiniMap({
 
   const initialRot = (heading * 180) / Math.PI;
 
+  const fuelPct = Math.max(0, Math.min(1, fuel));
+  const fuelArcLength = Math.PI * 106; // ~333.01
+  const fuelColor =
+    fuelPct >= 0.3 ? "#df9b20" : fuelPct >= 0.15 ? "#e5a93b" : "#e05338";
+
   return (
     <button
       type="button"
       onClick={onOpen}
       title="Click to open map (M)"
       aria-label="Open full map"
-      className="group relative pointer-events-auto w-[35vh] h-[35vh] aspect-square overflow-hidden rounded-full border-2 border-white/40 bg-[#07131c]/80 shadow-2xl backdrop-blur-md cursor-pointer transition-transform hover:scale-[1.03] active:scale-95 text-left p-0 block focus:outline-none"
+      className="group relative pointer-events-auto w-[35vh] h-[35vh] aspect-square select-none cursor-pointer transition-transform hover:scale-[1.03] active:scale-95 text-left p-0 block focus:outline-none"
     >
       <svg
         viewBox={`0 0 ${size} ${size}`}
-        className="h-full w-full select-none pointer-events-none"
+        className="h-full w-full select-none pointer-events-none drop-shadow-[0_10px_25px_rgba(0,0,0,0.7)]"
       >
         <defs>
           <radialGradient id="minimap-ground" cx="50%" cy="50%" r="60%">
             <stop offset="0%" stopColor="#7acb70" />
             <stop offset="100%" stopColor="#4ea35f" />
           </radialGradient>
+          <linearGradient id="fuel-ochre-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#f0b429" />
+            <stop offset="50%" stopColor="#df9b20" />
+            <stop offset="100%" stopColor="#b87d14" />
+          </linearGradient>
           <clipPath id="minimap-circle-clip">
-            <circle cx="100" cy="100" r="99" />
+            <circle cx="120" cy="120" r="92" />
           </clipPath>
         </defs>
 
+        {/* Circular Map Body */}
         <g clipPath="url(#minimap-circle-clip)">
           {/* Ocean/surroundings background */}
           <rect width={size} height={size} fill="#4aa8d8" />
 
-          {/* Dynamic moving & rotating world map (animated directly via mapGroupRef at 60fps) */}
+          {/* Dynamic moving & rotating world map */}
           <g
             ref={mapGroupRef}
             transform={`translate(${arrowX}, ${arrowY}) rotate(${initialRot.toFixed(3)}) translate(${(-x * scale).toFixed(3)}, ${(-z * scale).toFixed(3)})`}
@@ -663,9 +690,9 @@ function MiniMap({
           </g>
 
           {/* Radar range ring */}
-          <circle cx="100" cy="100" r="65" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="3 3" />
+          <circle cx="120" cy="120" r="62" fill="none" stroke="rgba(255,255,255,0.14)" strokeWidth="1" strokeDasharray="3 3" />
 
-          {/* Fixed Arrow: 15% down from center (100, 130), facing forward (straight UP) */}
+          {/* Fixed Arrow: 15% down from center (120, 156), facing forward (straight UP) */}
           <g transform={`translate(${arrowX} ${arrowY})`}>
             {/* Subtle pulse / glow halo */}
             <circle cx="0" cy="0" r="11" fill="#ff5a5f" opacity="0.25" />
@@ -680,8 +707,49 @@ function MiniMap({
           </g>
         </g>
 
-        {/* Circular inner bezel / compass border */}
-        <circle cx="100" cy="100" r="98.5" fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="2" />
+        {/* Circular Map Border Rim */}
+        <circle cx="120" cy="120" r="92" fill="none" stroke="#07131c" strokeWidth="3.5" />
+        <circle cx="120" cy="120" r="92" fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.8" />
+
+        {/* Outer Yellow Ochre Fuel Tank Arc (Left Side: just outside mini-map, drains top to bottom) */}
+        {/* Background track along left outer side */}
+        <path
+          d="M 120 226 A 106 106 0 0 1 120 14"
+          fill="none"
+          stroke="rgba(255, 255, 255, 0.12)"
+          strokeWidth="7.5"
+          strokeLinecap="round"
+        />
+        {/* Active Glowing Yellow Ochre Fuel Arc */}
+        <path
+          d="M 120 226 A 106 106 0 0 1 120 14"
+          fill="none"
+          stroke="url(#fuel-ochre-grad)"
+          strokeWidth="8"
+          strokeLinecap="round"
+          strokeDasharray={`${(fuelArcLength * fuelPct).toFixed(2)} ${fuelArcLength.toFixed(2)}`}
+          style={{ filter: "drop-shadow(0 0 6px rgba(223, 155, 32, 0.95))" }}
+        />
+
+        {/* Fuel Segment Divider Notches (4 segments at 135deg, 180deg, 225deg) */}
+        {[135, 180, 225].map((angleDeg, idx) => {
+          const rad = (angleDeg * Math.PI) / 180;
+          const x1 = 120 + 100 * Math.cos(rad);
+          const y1 = 120 + 100 * Math.sin(rad);
+          const x2 = 120 + 112 * Math.cos(rad);
+          const y2 = 120 + 112 * Math.sin(rad);
+          return (
+            <line
+              key={`fuel-notch-${idx}`}
+              x1={x1}
+              y1={y1}
+              x2={x2}
+              y2={y2}
+              stroke="#07131c"
+              strokeWidth="2.5"
+            />
+          );
+        })}
       </svg>
 
       {/* GPS Active indicator if route exists */}
@@ -691,6 +759,14 @@ function MiniMap({
           <span>GPS ACTIVE</span>
         </div>
       )}
+
+      {/* Fuel Level Badge in Yellow Ochre */}
+      <div className="pointer-events-none absolute bottom-2 left-2 flex items-center gap-1 rounded-full border border-[#df9b20]/40 bg-black/70 px-2 py-0.5 text-[9px] font-extrabold text-[#f0b429] shadow-lg backdrop-blur">
+        <span className="text-[10px]">⛽</span>
+        <span className="tabular-nums font-black text-white">
+          {Math.round(fuelPct * 100)}%
+        </span>
+      </div>
     </button>
   );
 }

@@ -54,6 +54,10 @@ export type GameMode = "city" | "track";
 export type Stats = {
   /** km/h display. */
   speed: number;
+  /** Current gear: 1..8 forward gears, -1 for reverse, 0 for neutral. */
+  gear: number;
+  /** Live engine RPM (0.0 to 10.0 scale, where redline starts at 7.0). */
+  rpm: number;
   /** Player world position, used by HUD elements such as the minimap. */
   x: number;
   z: number;
@@ -82,7 +86,15 @@ export type PopupKind = "coin" | "drift" | "stunt" | "camera";
 
 export type EngineCallbacks = {
   onStats?: (s: Stats) => void;
-  onPose?: (x: number, z: number, heading: number) => void;
+  onPose?: (
+    x: number,
+    z: number,
+    heading: number,
+    speed?: number,
+    rpm?: number,
+    gear?: number,
+    nitro?: number,
+  ) => void;
   onPopup?: (text: string, kind: PopupKind) => void;
   onBankCoins?: (amount: number) => void;
   onDriftBanked?: (score: number) => void;
@@ -224,6 +236,11 @@ export class GameEngine {
   private airSpin = 0; // accumulated |heading change| while airborne
   private airTime = 0;
   private jumpArmed = true;
+
+  // ---- Automatic 8-Speed Gearbox & Engine Dynamics ----
+  private gear = 1; // 1..8 forward gears, -1 for Reverse
+  private rpm = 1.0; // 0.0 to 10.0 RPM (1.0 = ~1000 RPM idle, redline at 7.0 - 10.0)
+  private shiftTimer = 0; // seconds remaining in current gear shift transition
 
   // ---- Vehicle body dynamics (visual weight transfer / suspension) ----
   private bodyRoll = 0; // smoothed lean into corners (radians)
@@ -726,13 +743,23 @@ export class GameEngine {
     this.updateCamera(dt);
     this.updateAudio();
     this.updateWear(sdt);
-    this.cb.onPose?.(this.px, this.pz, this.heading);
+    this.cb.onPose?.(
+      this.px,
+      this.pz,
+      this.heading,
+      Math.round(Math.abs(this.vf) * KMH),
+      this.rpm,
+      this.gear,
+      this.nitroCharge,
+    );
 
     this.statsTimer += dt;
     if (this.statsTimer >= 0.04) {
       this.statsTimer = 0;
       this.cb.onStats?.({
         speed: Math.round(Math.abs(this.vf) * KMH),
+        gear: this.gear,
+        rpm: this.rpm,
         x: this.px,
         z: this.pz,
         heading: this.heading,
@@ -796,7 +823,8 @@ export class GameEngine {
       this.nitroCharge = Math.max(0, this.nitroCharge - dt / (2.6 + upg.nitro * 0.6));
       if (!this.nitroWasOn) this.cb.onEvent?.("nitro");
     } else {
-      this.nitroCharge = Math.min(1, this.nitroCharge + dt / 7);
+      // 10x slower passive recharge rate (70s full charge)
+      this.nitroCharge = Math.min(1, this.nitroCharge + dt / 70);
     }
     this.audio.nitro(wantNitro);
     this.nitroWasOn = wantNitro;
@@ -844,31 +872,104 @@ export class GameEngine {
       return;
     }
 
-    // ---- Grounded physics ----
+    // ---- Grounded physics with 8-Speed Automatic Transmission & Progressive Acceleration ----
     const speedBonus = 1 + upg.speed * 0.04;
     const accelBonus = 1 + upg.speed * 0.03;
     const maxFwd = car.topSpeed * boost * speedBonus;
-    const maxRev = car.topSpeed * 0.42;
+    const maxRev = car.topSpeed * 0.38;
     const v = this.vf;
-    // Progressive acceleration: engine power tapers as we approach top speed,
-    // so cars build up speed gradually instead of snapping to max.
+
+    // Automatic 8-speed transmission gear ratios (speed threshold fraction per gear)
+    const GEAR_RATIOS = [0.12, 0.24, 0.38, 0.52, 0.65, 0.77, 0.88, 1.00];
+    // Torque delivery per gear (high power in lower gears, smooth pull in higher gears)
+    const GEAR_TORQUES = [2.20, 1.75, 1.45, 1.25, 1.10, 1.00, 0.92, 0.85];
+    // Entry RPM when shifting into gear (Gear 1 starts at 0.0 for smooth 0-to-redline sweep)
+    const GEAR_ENTRY_RPM = [0.0, 3.8, 4.2, 4.5, 4.8, 5.2, 5.5, 5.8];
+    // Upshift RPM threshold: 7.8-8.8 for gears 1-7, and 9.2-9.6 in top gear 8
+    const GEAR_SHIFT_RPM = [7.8, 8.0, 8.2, 8.4, 8.5, 8.6, 8.8, 9.6];
+
+    if (this.shiftTimer > 0) {
+      this.shiftTimer -= dt;
+    }
+
     const speedRatio = Math.max(0, v) / maxFwd;
-    const powerCurve = 1 - 0.55 * speedRatio;
+    const powerCurve = Math.max(0.60, 1 - 0.35 * Math.pow(speedRatio, 1.2));
+
+    // Calculate RPM and handle automatic gear shifts (1 to 8 + Reverse)
+    if (reverse && v <= 0.5) {
+      this.gear = -1; // Reverse
+      const revRatio = Math.min(1, Math.abs(v) / maxRev);
+      const targetRpm = revRatio * 7.5 + (reverse ? 1.0 : 0);
+      this.rpm += (targetRpm - this.rpm) * Math.min(1, dt * 14);
+    } else if (v < 0.2 && !throttle) {
+      this.gear = 1; // 1st gear stopped / idling at 0
+      const targetRpm = 0.0;
+      this.rpm += (targetRpm - this.rpm) * Math.min(1, dt * 12);
+    } else {
+      let g = Math.max(1, Math.min(8, this.gear === -1 ? 1 : this.gear));
+      const prevGearSpeed = g > 1 ? maxFwd * GEAR_RATIOS[g - 2] : 0;
+      const thisGearSpeed = maxFwd * GEAR_RATIOS[g - 1];
+      const minSpeed = g === 1 ? 0 : prevGearSpeed * 0.82;
+      const gearRange = Math.max(1.5, thisGearSpeed - minSpeed);
+      const speedInGear = Math.max(0, Math.min(1.0, (v - minSpeed) / gearRange));
+
+      const entryRpm = GEAR_ENTRY_RPM[g - 1];
+      const shiftRpm = GEAR_SHIFT_RPM[g - 1];
+
+      let baseRpm = entryRpm + speedInGear * (shiftRpm - entryRpm);
+      if (throttle) baseRpm += (g === 1 ? 0.8 : 0.3) * (1.0 - speedInGear);
+      if (wantNitro) baseRpm += 0.6;
+
+      // Automatic Upshift logic: needle reaches 7.8-8.8 in gears 1 to 7 before upshifting!
+      if (throttle && g < 8 && this.shiftTimer <= 0) {
+        if (baseRpm >= shiftRpm * 0.95 || v >= thisGearSpeed * 0.95) {
+          g++;
+          this.gear = g;
+          this.shiftTimer = 0.20; // 200ms dual-clutch shift time
+          this.rpm = GEAR_ENTRY_RPM[g - 1]; // Needle drops crisply to next gear entry RPM!
+        }
+      }
+
+      // Automatic Downshift logic: shift down as car decelerates
+      if (g > 1 && this.shiftTimer <= 0) {
+        if (v < minSpeed * 0.80 || (!throttle && baseRpm < entryRpm * 0.80)) {
+          g--;
+          this.gear = g;
+          this.shiftTimer = 0.16;
+          this.rpm = Math.min(8.2, GEAR_SHIFT_RPM[g - 1] * 0.88); // Rev match throttle blip!
+        }
+      }
+
+      this.gear = g;
+      const targetRpm = this.shiftTimer > 0 ? GEAR_ENTRY_RPM[g - 1] : baseRpm;
+      this.rpm += (targetRpm - this.rpm) * Math.min(1, dt * 14);
+    }
+    this.rpm = Math.max(0.0, Math.min(9.9, this.rpm));
+
+    // Torque multiplier based on current gear and shift state
+    const currentTorque = this.gear > 0 ? GEAR_TORQUES[this.gear - 1] : 1.1;
+    const shiftTorqueCut = this.shiftTimer > 0 ? 0.35 : 1.0;
+
+    // Calibrated acceleration scaling for progressive gear-by-gear acceleration
+    const ACCEL_SCALE = 0.30;
+    const aeroDrag = 0.0005 * v * Math.abs(v);
+
     if (reverse && v > 1) {
-      // Reverse pedal acts as the brake while moving forward. Braking is
-      // powerful but takes more distance from high speed (constant force).
-      const brakeForce = car.accel * 2.1;
+      // Reverse pedal acts as the brake while moving forward.
+      const brakeForce = car.accel * ACCEL_SCALE * 3.2;
       this.vf -= brakeForce * dt;
       if (this.vf < 0) this.vf = 0;
     } else if (throttle) {
-      this.vf += car.accel * dt * boost * powerCurve * accelBonus;
+      const forwardForce =
+        car.accel * ACCEL_SCALE * dt * boost * currentTorque * shiftTorqueCut * powerCurve * accelBonus;
+      this.vf += forwardForce - aeroDrag * dt;
     } else if (reverse) {
-      this.vf -= car.accel * 0.55 * dt;
+      this.vf -= car.accel * ACCEL_SCALE * 0.85 * dt;
     } else {
-      // Engine braking + rolling resistance (light).
-      this.vf -= this.vf * Math.min(1, dt * 0.5);
+      // Engine braking + rolling resistance
+      this.vf -= (this.vf * Math.min(1, dt * 0.40) + aeroDrag * dt);
     }
-    if (handbrake) this.vf -= this.vf * Math.min(1, dt * 1.0);
+    if (handbrake) this.vf -= this.vf * Math.min(1, dt * 1.1);
     // Rougher surfaces scrub speed.
     this.vf -= this.vf * Math.min(1, dt * surface.drag);
     // Grass: heavy 40-50% speed loss when leaving the paved surface on NASCAR track mode only.
@@ -1786,10 +1887,10 @@ export class GameEngine {
 
 
   private updateAudio() {
-    const speedN = Math.min(1, Math.abs(this.vf) / this.config.car.topSpeed);
-    this.audio.engine(speedN, this.input("accel"));
+    this.audio.engine(this.rpm / 10, this.input("accel"));
     if (this.isTrackMode) {
       // Crowd roar rises near the front-straight grandstands and pit lane.
+      const speedN = Math.min(1, Math.abs(this.vf) / this.config.car.topSpeed);
       const prox = Math.max(0, 1 - Math.abs(this.pz - TRACK.az) / 240);
       this.audio.crowd(prox * (0.45 + speedN * 0.55));
     } else {
